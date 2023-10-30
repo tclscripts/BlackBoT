@@ -50,26 +50,28 @@ def sqlite3_createTables(self):
                     ); """
         channels_query = """ CREATE TABLE IF NOT EXISTS CHANNELS (
                              id INT AUTO_INCREMENT PRIMARY KEY NOT NULL,
-                             channelName VARCHAR(999) NOT NULL,
+                             channelName VARCHAR(999) NOT NULL
                     ); """
         channel_settings = """ CREATE TABLE IF NOT EXISTS SETTINGS (
-                               channelId INT,
-                               settingId INT,
+                               channelId INT NOT NULL,
+                               settingId INT NOT NULL,
                                timeSet DATETIME,
                                userId INT,
                                readOnly INT,
-                               INDEX `id_channelId_FK` (`channelId`), CONSTRAINT `id_channelId_FK` FOREIGN KEY (`channelId`) REFERENCES `CHANNELS` (`id`) ON UPDATE NO ACTION ON DELETE CASCADE,
-                               INDEX `id_settingId_FK` (`settingId`), CONSTRAINT `id_settingId_FK` FOREIGN KEY (`settingId`) REFERENCES `VALIDSETTINGS` (`id`) ON UPDATE NO ACTION ON DELETE CASCADE,
-                               INDEX `id_userId_FK` (`id_userId_FK`), CONSTRAINT `id_userId_FK` FOREIGN KEY (`userId`) REFERENCES `USERS` (`id`) ON UPDATE NO ACTION ON DELETE NO ACTION
+                               FOREIGN KEY (channelId) REFERENCES CHANNELS(id) ON UPDATE NO ACTION ON DELETE CASCADE,
+                               FOREIGN KEY (settingId) REFERENCES VALIDSETTINGS(id) ON UPDATE NO ACTION ON DELETE CASCADE,
+                               FOREIGN KEY (userId) REFERENCES USERS(id) ON UPDATE NO ACTION ON DELETE NO ACTION
                     ); """
+        
         valid_settings = """ CREATE TABLE IF NOT EXISTS VALIDSETTINGS (
                              id INT AUTO_INCREMENT PRIMARY KEY NOT NULL,
                              setting VARCHAR(255) NOT NULL,
                              description VARCHAR(255)
                     ); """
         sqlite3_execute(self, valid_settings)
-        sqlite3_execute(self, channel_settings)
-        sqlite3_execute(self, users_query)
         sqlite3_execute(self, channels_query)
+        sqlite3_execute(self, users_query)
+        sqlite3_execute(self, channel_settings)
+        
 
 ###
