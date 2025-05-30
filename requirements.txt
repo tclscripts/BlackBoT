@@ -1,0 +1,9 @@
+setuptools
+yt-dlp
+twisted
+pyopenssl
+service_identity
+psutil
+scapy
+bcrypt
+watchdog

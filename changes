@@ -1,0 +1,40 @@
+# added auto rejoin throttle for bot
+# added auto suspend channel if cannot join
+# thread to recover main nick when available
+# autoupdate on status change for users
+# added !uptime command
+# added !channels command
+# added rehash functionality for commands.py
+# added line split procedure in order to not lines bigger than 450 chars
+# added pass <password> (encrypted)
+# added newpass <password>
+# added auto login on join
+# added login on command, accepta multiple logins
+# added deauth on quit
+# added thread to verify if all users that disconnected are deauth
+# check for valid channel on commands must start with # or &
+# to check !cycle <chan> ...etc with chan or not on private or channel
+# solved issue related to op, deop
+# added voice, devoice, hop, hdeop
+# added login save, to save host to your current hosts so the bot will auto login the user
+# added timer for autoremove known users if not on channel
+# to add to check if someone changes their nickname to update the variables
+# added nickname to logged users variable
+# added !version command
+# added !add <nick1> <nick2> command
+# added !userlist
+# solved !add command
+# added !delacc command
+# added !del command
+# solved auto login for those who don't have a password set
+# to send a message whenever user tries a command but it doesn't have a password set
+# added auth [username] <password>, now [username] is optional
+# added !Info <user>/<channel>
+# moved bot settings to settings.py
+
+# to implement autoupdate
+# to add deauth !! to solve !!
+# to add addhost, delhost !! to solve !!
+# to add adduser !! to solve !!
+
+
