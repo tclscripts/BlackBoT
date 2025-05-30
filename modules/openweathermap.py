@@ -36,7 +36,7 @@ def get_weather(city, api_key):
 
 
 if __name__ == "__main__":
-    api_key = "619096a4e034f423bb6f6b9873a00684"
+    api_key = "XXXXXXX"
     city = input("Introduceți numele orașului: ")
     weather = get_weather(city, api_key)
 
