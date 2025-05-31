@@ -4,41 +4,41 @@
 # Core Bot Identification Settings
 # ───────────────────────────────────────────────
 
-char = "!"  # Prefixul pentru comenzile botului
+char = "!"  # Prefix for bot commands
 
-nickname = "BlackBoT"  # Nickname-ul principal al botului
-username = "Black"  # Identul (username) IRC al botului
-altnick = "BlackBoT_"  # Nickname alternativ, folosit dacă nickname-ul principal e deja luat
-realname = "BlackBoT: Python Edition"  # Realname-ul botului (vizibil în WHOIS)
-away = "No Away"  # Mesajul implicit de away pentru bot
+nickname = "BlackBoT"  # Bot's main nickname
+username = "Black"  # IRC ident (username) of the bot
+altnick = "BlackBoT_"  # Alternate nickname, used if the main one is taken
+realname = "BlackBoT: Python Edition"  # Realname shown in WHOIS
+away = "No Away"  # Default away message for the bot
 
 # ───────────────────────────────────────────────
-# Server & Conexiune
+# Server & Connection
 # ───────────────────────────────────────────────
 
-sourceIP = ""  # IP-ul sursă de pe care se face conexiunea ("" = auto)
-sourcePort = 3337  # Portul de ieșire (util doar dacă sourceIP este setat)
+sourceIP = ""  # Source IP for connection ("" = auto)
+sourcePort = 3337  # Outgoing port (used only if sourceIP is set)
 
-# Lista serverelor IRC la care se poate conecta (format: "host port")
+# List of IRC servers the bot can connect to (format: "host port")
 servers = [
     "irc.libera.chat 6667",
     "irc.undernet.org 6667"
 ]
 
-port = 6667  # Portul default folosit dacă nu e specificat în lista `servers`
+port = 6667  # Default port used if not specified in `servers` list
 
-ssl_use = 0  # Setează 1 pentru a folosi SSL, 0 pentru conexiuni necriptate
+ssl_use = 0  # Set to 1 to use SSL, 0 for unencrypted connections
 
 # ───────────────────────────────────────────────
 # Channel Settings
 # ───────────────────────────────────────────────
 
-channels = ["#BT"]  # Canalele default pe care botul le va accesa la prima rulare
+channels = ["#BT"]  # Default channels the bot will join on first run
 
 # ───────────────────────────────────────────────
 # Hostname Format
 # ───────────────────────────────────────────────
-# Formatul pentru identificarea unui utilizator (hostname)
+# Format used to identify a user (hostname)
 # 1 = *!*@host
 # 2 = *!user@host
 # 3 = nick!user@host
@@ -47,31 +47,31 @@ channels = ["#BT"]  # Canalele default pe care botul le va accesa la prima rular
 default_hostname = 1
 
 # ───────────────────────────────────────────────
-# Autentificare & Acces
+# Authentication & Access
 # ───────────────────────────────────────────────
 
-multiple_logins = 1  # Permite logarea multiplă de pe mai multe hosturi? (1 = da, 0 = nu)
+multiple_logins = 1  # Allow multiple logins from different hosts? (1 = yes, 0 = no)
 
-# Timpul (în ore) după care utilizatorii inactivi sunt auto-deautentificați
+# Time (in hours) after which inactive users are auto-deauthenticated
 autoDeauthTime = 1
 
 # ───────────────────────────────────────────────
 # Channel Rejoin
 # ───────────────────────────────────────────────
 
-# Număr maxim de încercări de a reintra într-un canal (în caz de kick, etc.)
+# Maximum number of attempts to rejoin a channel (in case of kick, etc.)
 maxAttemptRejoin = 5
 
 # ───────────────────────────────────────────────
 # Database
 # ───────────────────────────────────────────────
 
-# Numele bazei de date SQLite folosită de bot
+# Name of the SQLite database used by the bot
 sqlite3_database = "work.db"
 
 # ───────────────────────────────────────────────
 # CTCP
 # ───────────────────────────────────────────────
 
-# Mesajul trimis ca răspuns la CTCP VERSION
+# Message sent in response to CTCP VERSION
 version = "BlackBoT: Python Edition"
