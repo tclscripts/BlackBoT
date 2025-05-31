@@ -4,22 +4,22 @@
 # BlackBoT starter
 # ───────────────────────────────────────────────
 
-import BlackBoT as B
-import settings as s
+import BlackBoT
+import settings
 
 old_source = ""
 
 if __name__ == '__main__':
-    old_source = s.sourceIP
-    bot_ip = B.host_resolve(s.sourceIP)
-    if len(s.servers) == 0:
+    old_source = settings.sourceIP
+    bot_ip = BlackBoT.host_resolve(settings.sourceIP)
+    if len(settings.servers) == 0:
         print(f"No servers in list to connect")
         exit()
     else:
-        get_server = B.server_choose_to_connect()
-    if s.ssl_use == 1:
-        sslContext = B.ssl.ClientContextFactory()
-        B.reactor.connectSSL(get_server[0], int(get_server[1]), B.BotFactory(s.nickname, s.realname), B.sslContext)
+        get_server = BlackBoT.server_choose_to_connect()
+    if settings.ssl_use == 1:
+        sslContext = BlackBoT.ssl.ClientContextFactory()
+        BlackBoT.reactor.connectSSL(get_server[0], int(get_server[1]), BlackBoT.BotFactory(settings.nickname, settings.realname), BlackBoT.sslContext)
     else:
-        B.reactor.connectTCP(get_server[0], int(get_server[1]), B.BotFactory(s.nickname, s.realname))
-    B.reactor.run()
+        BlackBoT.reactor.connectTCP(get_server[0], int(get_server[1]), BlackBoT.BotFactory(settings.nickname, settings.realname))
+    BlackBoT.reactor.run()
