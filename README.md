@@ -27,29 +27,16 @@ nano settings.py
 python Starter.py
 ```
 
-## 🔑 Access Flags
-- → No access required (private only)
-
-N → Global BOSS owner
-n → Global owner
-m → Global master
-M → Channel Manager
-A → Channel Admin
-O → Channel Owner
-V → Voiced User
-
----
-
 ## 📂 File Structure
-  plaintext
-  Copy
-  Edit
-  BlackBoT/
-  ├── core/                # Command logic, SQL, variables
-  ├── modules/             # External modules like YouTube title fetcher
-  ├── settings.py          # Configuration and bot settings
-  ├── update.py            # Auto-update mechanism
-  ├── commands_map.py      # Command configuration list
-  ├── BlackBoT.py          # Main bot implementation
-  └── Starter.py           # Entry point for launching
+#  plaintext
+#  Copy
+#  Edit
+#  BlackBoT/
+#  ├── core/                # Command logic, SQL, variables
+#  ├── modules/             # External modules like YouTube title fetcher
+#  ├── settings.py          # Configuration and bot settings
+#  ├── update.py            # Auto-update mechanism
+#  ├── commands_map.py      # Command configuration list
+#  ├── BlackBoT.py          # Main bot implementation
+#  └── Starter.py           # Entry point for launching
 
