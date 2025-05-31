@@ -28,15 +28,14 @@ python Starter.py
 ```
 
 ## 📂 File Structure
-#  plaintext
-#  Copy
-#  Edit
-#  BlackBoT/
-#  ├── core/                # Command logic, SQL, variables
-#  ├── modules/             # External modules like YouTube title fetcher
-#  ├── settings.py          # Configuration and bot settings
-#  ├── update.py            # Auto-update mechanism
-#  ├── commands_map.py      # Command configuration list
-#  ├── BlackBoT.py          # Main bot implementation
-#  └── Starter.py           # Entry point for launching
+``` 
+  BlackBoT/
+  ├── core/                # Command logic, SQL, variables
+  ├── modules/             # External modules like YouTube title fetcher
+  ├── settings.py          # Configuration and bot settings
+  ├── update.py            # Auto-update mechanism
+  ├── commands_map.py      # Command configuration list
+  ├── BlackBoT.py          # Main bot implementation
+  └── Starter.py           # Entry point for launching
+```
 
