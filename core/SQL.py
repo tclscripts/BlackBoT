@@ -606,6 +606,7 @@ class SQL:
                                  addedTime TIMESTAMP,
                                  status INTEGER,
                                  lastChangedTime TIMESTAMP,
+                                 comment VARCHAR(999),
                                  FOREIGN KEY (botId) REFERENCES BOTSETTINGS(botId) ON UPDATE NO ACTION ON DELETE CASCADE
                         ); """
         channel_settings = """ CREATE TABLE IF NOT EXISTS SETTINGS (
