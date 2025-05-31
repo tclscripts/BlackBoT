@@ -76,7 +76,10 @@ settings = [
 ]
 
 # Users settings
-users_settings = ['email', 'greet', 'lastseen', 'lastSeenOn']
+users_settings = ['lastseen', 'lastSeenOn']
+
+# Users settings allowed to be changed
+users_settings_change = ['email', 'greet', 'autologin']
 
 ########################################################################################################################
 #  do not change these variables

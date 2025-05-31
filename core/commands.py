@@ -8,6 +8,61 @@ import os
 import bcrypt
 from core import update
 import settings as s
+import Variables as v
+
+
+def cmd_myset(self, channel, feedback, nick, host, msg):
+    parts = msg.strip().split(None, 1)
+
+    host_mask = self.get_hostname(nick, host, 0)
+    sql = SQL(self.sqlite3_database)
+
+    info = sql.sqlite_handle(self.botId, nick, host_mask)
+    userId = info[0] if info else self.get_logged_in_user_by_host(host_mask)
+
+    if not userId or not self.is_logged_in(userId, host_mask):
+        return
+
+    if len(parts) < 2:
+        self.send_message(feedback, f"⚠️ Usage: {s.char}myset <{'|'.join(v.users_settings_change)}> <value>")
+        return
+
+    setting, value = parts[0].lower(), parts[1].strip()
+
+    if setting not in v.users_settings_change:
+        self.send_message(feedback, f"❌ Invalid setting. Allowed: {', '.join(v.users_settings_change)}")
+        return
+
+    if setting == "autologin":
+        value = value.lower()
+        if value not in ["on", "off"]:
+            self.send_message(feedback, "⚠️ autologin must be 'on' or 'off'")
+            return
+        value = "1" if value == "on" else "0"
+
+    sql.sqlite_update_user_setting(self.botId, userId, setting, value)
+    self.send_message(feedback, f"✅ Setting `{setting}` updated to: {value}")
+
+
+def cmd_deauth(self, channel, feedback, nick, host, msg):
+    host = self.get_hostname(nick, host, 0)
+
+    userId = self.get_logged_in_user_by_host(host)
+    if not userId:
+        self.send_message(feedback, "ℹ️ You are not currently authenticated.")
+        return
+
+    if userId in self.logged_in_users:
+        if host in self.logged_in_users[userId]["hosts"]:
+            self.logged_in_users[userId]["hosts"].remove(host)
+            if not self.logged_in_users[userId]["hosts"]:
+                del self.logged_in_users[userId]
+            self.send_message(feedback, "🔓 You have been deauthenticated successfully.")
+            print(f"🔓 Manual logout: {nick} (userId={userId}) from {host}")
+        else:
+            self.send_message(feedback, "ℹ️ You are not logged in from this host.")
+    else:
+        self.send_message(feedback, "ℹ️ You are not currently authenticated.")
 
 
 def cmd_update(self, channel, feedback, nick, host, msg):

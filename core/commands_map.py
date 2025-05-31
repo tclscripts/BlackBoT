@@ -40,5 +40,9 @@ command_definitions = [
     {'name': 'info', 'description': 'Command executed by the user to get info about a user or channel.',
      'flags': 'NnmMAOV', 'id': '25'},
     {'name': 'update', 'description': 'Command executed by the user to check for updates.',
-     'flags': 'N', 'id': '26'}
+     'flags': 'N', 'id': '26'},
+    {'name': 'deauth', 'description': 'Deauthenticate yourself.',
+     'flags': '-', 'id': '27'},
+    {'name': 'myset', 'description': 'Valid users can set their user settings',
+     'flags': '-', 'id': '28'}
 ]

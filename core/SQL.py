@@ -83,6 +83,41 @@ class SQL:
         """
         self.sqlite3_insert(query, (botId, nick, host, userId, int(success)))
 
+    def sqlite_get_user_setting(self, botId, userId, setting_name):
+        query = """
+            SELECT settingValue
+            FROM USERSSETTINGS
+            WHERE botId = ? AND userId = ? AND setting = ?
+        """
+        result = self.sqlite_select(query, (botId, userId, setting_name))
+        if result:
+            return result[0][0]
+        return None
+
+    def sqlite_update_user_setting(self, botId, userId, setting, value):
+        # Verificăm dacă setarea există deja
+        select_query = """
+            SELECT 1 FROM USERSSETTINGS
+            WHERE botId = ? AND userId = ? AND setting = ?
+        """
+        exists = self.sqlite_select(select_query, [botId, userId, setting])
+
+        if exists:
+            # Dacă există, facem UPDATE
+            update_query = """
+                UPDATE USERSSETTINGS
+                SET settingValue = ?
+                WHERE botId = ? AND userId = ? AND setting = ?
+            """
+            self.sqlite3_insert(update_query, [value, botId, userId, setting])
+        else:
+            # Dacă nu există, facem INSERT
+            insert_query = """
+                INSERT INTO USERSSETTINGS (botId, userId, setting, settingValue)
+                VALUES (?, ?, ?, ?)
+            """
+            self.sqlite3_insert(insert_query, [botId, userId, setting, value])
+
     # get userId by name
     def sqlite_get_user_id_by_name(self, botId, username):
         query = "SELECT id FROM users WHERE botId = ? AND username = ? COLLATE NOCASE"

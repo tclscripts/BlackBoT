@@ -386,6 +386,7 @@ class Bot(irc.IRCClient):
 
             key = (wnickname, whost)
             if key in self.user_cache:
+                sql = SQL.SQL(self.sqlite3_database)
                 userId = self.user_cache[key]
             else:
                 sql = SQL.SQL(self.sqlite3_database)
@@ -404,6 +405,11 @@ class Bot(irc.IRCClient):
                 stored_hash = sql.sqlite_get_user_password(userId)
                 if not stored_hash:
                     return
+                autologin_setting = sql.sqlite_get_user_setting(self.botId, userId, 'autologin')
+
+                if autologin_setting is not None and autologin_setting == "0":
+                    return
+
                 if userId not in self.logged_in_users:
                     self.logged_in_users[userId] = {"hosts": [], "nick": wnickname}
                 if lhost not in self.logged_in_users[userId]["hosts"]:
