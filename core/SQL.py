@@ -572,8 +572,7 @@ class SQL:
         ch = self.sqlite_select(query_ch, (botId, userId))
         return ch[0] if ch else (None, None)
 
-    ##
-    # create tables
+
     def sqlite3_createTables(self):
         users_query = """ CREATE TABLE IF NOT EXISTS USERS (
                                botId INTEGER NOT NULL,
