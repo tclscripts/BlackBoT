@@ -27,7 +27,7 @@ nano settings.py
 python Starter.py
 ```
 
-🔑 Access Flags
+## 🔑 Access Flags
 - → No access required (private only)
 
 N → Global BOSS owner
@@ -40,7 +40,7 @@ V → Voiced User
 
 ---
 
-  📂 File Structure
+## 📂 File Structure
   plaintext
   Copy
   Edit
