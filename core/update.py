@@ -113,8 +113,7 @@ def update_from_github(self, feedback):
                 f.write(remote_version)
 
             self.send_message(feedback, "✅ Update complete. Restarting...")
-            python = sys.executable
-            os.execl(python, python, *sys.argv)
+            self.restart("✨ Updating... Be right back with fresh powers!")
 
     except Exception as e:
         self.send_message(feedback, f"❌ Update failed: {e}")

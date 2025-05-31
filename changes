@@ -31,6 +31,8 @@
 # added auth [username] <password>, now [username] is optional
 # added !Info <user>/<channel>
 # moved bot settings to settings.py
+# solved issue regarding QUIT with message
+# solved issue regarding not knowing if the bot has a status mode on channel
 
 # to implement autoupdate
 # to add deauth !! to solve !!

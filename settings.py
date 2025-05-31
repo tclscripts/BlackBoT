@@ -21,8 +21,8 @@ sourcePort = 3337  # Outgoing port (used only if sourceIP is set)
 
 # List of IRC servers the bot can connect to (format: "host port")
 servers = [
-    "irc.libera.chat 6667",
-    "irc.undernet.org 6667"
+    "irc.undernet.org 6667",
+    "irc.libera.chat 6667"
 ]
 
 port = 6667  # Default port used if not specified in `servers` list

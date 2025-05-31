@@ -376,8 +376,6 @@ class Bot(irc.IRCClient):
             wident = params[2]
             whost = params[3]
             wnickname = params[5]
-            if wnickname == s.nickname:
-                return
             wstatus = params[6]
             wrealname = params[7]
             host = f"{wnickname}!{wident}@{whost}"
@@ -400,8 +398,9 @@ class Bot(irc.IRCClient):
                     wchannel, wnickname, wident, whost, privileges, wrealname, userId
                 ])
                 self.known_users.add((wchannel, wnickname))
+            if wnickname == s.nickname:
+                return
             if userId and not self.is_logged_in(userId, lhost):
-                # if doesn't have password set, do not auto login
                 stored_hash = sql.sqlite_get_user_password(userId)
                 if not stored_hash:
                     return
@@ -664,10 +663,14 @@ class Bot(irc.IRCClient):
         return False
 
     # restart bot process
-    def restart(self):
+    def restart(self, reason="Restarting..."):
+        self.sendLine(f"QUIT :{reason}")
+        reactor.callLater(2.0, self._restart_process)
+
+    def _restart_process(self):
         reactor.stop()
-        py = sys.executable
-        os.execl(py, py, *sys.argv)
+        python = sys.executable
+        os.execl(python, python, *sys.argv)
 
     # die process
     def die(self):
