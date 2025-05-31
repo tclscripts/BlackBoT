@@ -470,7 +470,6 @@ class SQL:
         exists = self.sqlite_select(check_query, (botId, channelId, userId))
 
         now = datetime.datetime.now()
-
         if exists:
             # Update
             update_query = """
