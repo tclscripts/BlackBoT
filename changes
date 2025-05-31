@@ -34,6 +34,9 @@
 # solved issue regarding QUIT with message
 # solved issue regarding not knowing if the bot has a status mode on channel
 # added !myset autologin <on>/<off> to enable, disable autologin, by default is enabled
+---
+# added ignores sql table
+# to implement ignore expire !!!!
 
 # to implement autoupdate
 # to add deauth !! to solve !!

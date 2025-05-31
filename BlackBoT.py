@@ -16,6 +16,7 @@ from core import SQL
 import Starter
 import settings as s
 from modules import YoutubeTitle as yt
+from collections import defaultdict, deque
 
 try:
     import pkg_resources
@@ -68,6 +69,8 @@ class Bot(irc.IRCClient):
         self.logged_in_users = {}
         self.known_users = set()  # (channel, nick)
         self.user_cache = {}  # {(nick, host): userId}
+        # ignore on flood via private messages
+        self.flood_tracker = defaultdict(lambda: deque())
         v.current_start_time = time.time()
         sql_instance = SQL.SQL(s.sqlite3_database)
         sql_instance.sqlite3_createTables()
@@ -93,6 +96,11 @@ class Bot(irc.IRCClient):
         self.thread_known_users_cleanup = threading.Thread(target=self.cleanup_known_users)
         self.thread_known_users_cleanup.daemon = True
         self.thread_known_users_cleanup.start()
+
+        # remove expired ignores
+        self.thread_ignore_cleanup = threading.Thread(target=self.cleanup_ignores)
+        self.thread_ignore_cleanup.daemon = True
+        self.thread_ignore_cleanup.start()
 
         self.stop_recover_nick = False
 
@@ -209,7 +217,32 @@ class Bot(irc.IRCClient):
             'reason': reason
         }
 
-    # check login and command access
+    def cleanup_ignores(self):
+        sql = SQL.SQL(self.sqlite3_database)
+        while True:
+            time.sleep(60)
+            sql.sqlite_cleanup_ignores()
+
+    def check_private_flood_prot(self, host):
+        sql = SQL.SQL(self.sqlite3_database)
+        if sql.sqlite_is_ignored(self.botId, host):
+            return True
+
+        limit, interval = map(int, s.private_flood_limit.split(":"))
+        now = time.time()
+
+        self.flood_tracker[host].append(now)
+        while self.flood_tracker[host] and now - self.flood_tracker[host][0] > interval:
+            self.flood_tracker[host].popleft()
+
+        if len(self.flood_tracker[host]) > limit:
+            print(f"⚠️ Flood detected from {host}, blacklisting...")
+            reason = f"Flooding bot (>{limit}/{interval}s)"
+            sql.sqlite_add_ignore(self.botId, host, s.private_flood_time * 60, reason)
+            return True
+
+        return False
+
     def check_command_access(self, channel, nick, host, flag_id, feedback=None):
         sql = SQL.SQL(self.sqlite3_database)
         lhost = self.get_hostname(nick, host, 0)
@@ -267,7 +300,6 @@ class Bot(irc.IRCClient):
             del self.logged_in_users[userId]
             print(f"🔒 Auto-logout (netsplit or left): userId={userId}")
 
-    #logout on quit
     def logoutOnQuit(self, user):
         nick = user
         matching = [u for u in self.channel_details if u[1] == nick]
@@ -366,6 +398,10 @@ class Bot(irc.IRCClient):
 
         if command == "PRIVMSG":
             target, message = params
+            nick, ident, host, hostmask = self.parse_prefix(prefix)
+            lhost = self.get_hostname(nick, f"{ident}@{host}", 0)
+            if self.check_private_flood_prot(lhost):
+                return
             if message.startswith("\x01VERSION\x01"):
                 user = prefix.split('!')[0]
                 self.ctcpQuery_VERSION(user, message)
@@ -479,6 +515,13 @@ class Bot(irc.IRCClient):
             else:
                 print(f"[WARN] Function cmd_{cmd['name']} not found in commands.py")
 
+    def parse_prefix(self, prefix):
+        if "!" in prefix and "@" in prefix:
+            nick, rest = prefix.split("!", 1)
+            ident, host = rest.split("@", 1)
+            return nick, ident, host, f"{nick}!{ident}@{host}"
+        return None, None, None, prefix
+
     def set_mode(self, channel, se, mode, user):
         sign = "+" if se else "-"
         self.sendLine(f"MODE {channel} {sign}{mode} {user}")
@@ -564,6 +607,9 @@ class Bot(irc.IRCClient):
 
         # if is private message
         if is_private:
+            lhost = self.get_hostname(nick, f"{host}", 0)
+            if self.check_private_flood_prot(lhost):
+                return
             feedback = nick
             if args[0].startswith(s.char):
                 command = args[0][1:]

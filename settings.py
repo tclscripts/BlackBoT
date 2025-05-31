@@ -21,8 +21,8 @@ sourcePort = 3337  # Outgoing port (used only if sourceIP is set)
 
 # List of IRC servers the bot can connect to (format: "host port")
 servers = [
-    "irc.undernet.org 6667",
-    "irc.libera.chat 6667"
+    "irc.libera.chat 6667",
+    "irc.undernet.org 6667"
 ]
 
 port = 6667  # Default port used if not specified in `servers` list
@@ -61,6 +61,16 @@ autoDeauthTime = 1
 
 # Maximum number of attempts to rejoin a channel (in case of kick, etc.)
 maxAttemptRejoin = 5
+
+# ───────────────────────────────────────────────
+# Private flood protection
+# ───────────────────────────────────────────────
+
+# Format: max:seconds (e.g., 3 messages in 5 seconds)
+private_flood_limit = "3:5"
+
+# Ignore time (minutes)
+private_flood_time = 5
 
 # ───────────────────────────────────────────────
 # Database

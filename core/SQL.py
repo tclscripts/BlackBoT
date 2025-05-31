@@ -75,7 +75,34 @@ class SQL:
             connection.close()
         return result
 
-    # save login attempts
+    def sqlite_add_ignore(self, botId, host, duration_seconds, reason):
+        now = int(time.time())
+        expires = now + duration_seconds
+        query = """
+            INSERT INTO IGNORES (botId, host, added, expires, reason)
+            VALUES (?, ?, ?, ?, ?)
+        """
+        self.sqlite3_insert(query, [botId, host, now, expires, reason])
+
+    # Verifică dacă un host este ignorat
+    def sqlite_is_ignored(self, botId, host):
+        now = int(time.time())
+        query = """
+            SELECT id FROM IGNORES
+            WHERE botId = ? AND host = ? AND expires > ?
+            LIMIT 1
+        """
+        result = self.sqlite_select(query, [botId, host, now])
+        if result:
+            return True
+        else:
+            return False
+
+    def sqlite_cleanup_ignores(self):
+        now = int(time.time())
+        query = "DELETE FROM IGNORES WHERE expires <= ?"
+        self.sqlite3_insert(query, [now])
+
     def sqlite_log_login_attempt(self, botId, nick, host, userId, success):
         query = """
         INSERT INTO USERLOGINS (botId, nick, host, userId, success, timestamp)
@@ -610,35 +637,35 @@ class SQL:
         users_query = """ CREATE TABLE IF NOT EXISTS USERS (
                                botId INTEGER NOT NULL,
                                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                               username VARCHAR(255) NOT NULL,
-                               password VARCHAR(999),
+                               username TEXT NOT NULL,
+                               password TEXT,
                                added TIMESTAMP,
                                FOREIGN KEY (botId) REFERENCES BOTSETTINGS(botId) ON UPDATE NO ACTION ON DELETE CASCADE
                         ); """
         users_hostnames = """ CREATE TABLE IF NOT EXISTS USERSHOSTNAMES (
                                 botId INTEGER NOT NULL,
                                 userId INTEGER NOT NULL,
-                                hostname VARCHAR(255),
+                                hostname TEXT,
                                 FOREIGN KEY (userId) REFERENCES USERS(id) ON UPDATE NO ACTION ON DELETE CASCADE,
                                 FOREIGN KEY (botId) REFERENCES BOTSETTINGS(botId) ON UPDATE NO ACTION ON DELETE CASCADE
         );"""
         users_settings = """ CREATE TABLE IF NOT EXISTS USERSSETTINGS (
                                 botId INTEGER NOT NULL,
                                 userId INTEGER NOT NULL,
-                                setting VARCHAR(255),
-                                settingValue VARCHAR(255),
+                                setting TEXT,
+                                settingValue TEXT,
                                 FOREIGN KEY (userId) REFERENCES USERS(id) ON UPDATE NO ACTION ON DELETE CASCADE,
                                 FOREIGN KEY (botId) REFERENCES BOTSETTINGS(botId) ON UPDATE NO ACTION ON DELETE CASCADE
         );"""
         channels_query = """ CREATE TABLE IF NOT EXISTS CHANNELS (
                                  botId INTEGER NOT NULL,
                                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                 channelName VARCHAR(999) NOT NULL,
-                                 addedBy VARCHAR(255),
+                                 channelName TEXT NOT NULL,
+                                 addedBy TEXT,
                                  addedTime TIMESTAMP,
                                  status INTEGER,
                                  lastChangedTime TIMESTAMP,
-                                 comment VARCHAR(999),
+                                 comment TEXT,
                                  FOREIGN KEY (botId) REFERENCES BOTSETTINGS(botId) ON UPDATE NO ACTION ON DELETE CASCADE
                         ); """
         channel_settings = """ CREATE TABLE IF NOT EXISTS SETTINGS (
@@ -646,26 +673,26 @@ class SQL:
                                    channelId INTEGER NOT NULL,
                                    settingId INTEGER NOT NULL,
                                    timeSet TIMESTAMP,
-                                   setBy VARCHAR(255),
+                                   setBy TEXT,
                                    readOnly INTEGER,
-                                   settingValue VARCHAR(999),
+                                   settingValue TEXT,
                                    FOREIGN KEY (channelId) REFERENCES CHANNELS(id) ON UPDATE NO ACTION ON DELETE CASCADE,
                                    FOREIGN KEY (settingId) REFERENCES VALIDSETTINGS(id) ON UPDATE NO ACTION ON DELETE CASCADE,
                                    FOREIGN KEY (botId) REFERENCES BOTSETTINGS(botId) ON UPDATE NO ACTION ON DELETE CASCADE
                         ); """
         valid_settings = """ CREATE TABLE IF NOT EXISTS VALIDSETTINGS (
                                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                 setting VARCHAR(255) NOT NULL,
+                                 setting TEXT NOT NULL,
                                  settingType INTEGER,
-                                 description VARCHAR(255)
+                                 description TEXT
                         ); """
         channel_access = """ CREATE TABLE IF NOT EXISTS CHANNELACCESS (
                                 botId INTEGER NOT NULL,
                                 accessId INTEGER NOT NULL,
                                 channelId INTEGER NOT NULL,
                                 userId INTEGER NOT NULL,
-                                addedBy VARCHAR(255),
-                                lastModifiedBy VARCHAR(255),
+                                addedBy TEXT,
+                                lastModifiedBy TEXT,
                                 lastModified TIMESTAMP,
                                 autoop INTEGER,
                                 autovoice INTEGER,
@@ -679,8 +706,8 @@ class SQL:
                                 botId INTEGER NOT NULL,
                                 accessId INTEGER NOT NULL,
                                 userId INTEGER NOT NULL,
-                                addedby VARCHAR(255),
-                                lastModifiedBy VARCHAR(255),
+                                addedby TEXT,
+                                lastModifiedBy TEXT,
                                 lastModified TIMESTAMP,
                                 autoop INTEGER,
                                 autovoice INTEGER,
@@ -694,14 +721,14 @@ class SQL:
                                 accessType VARCHAR(32),
                                 accessFlag VARCHAR(32),
                                 accessName VARCHAR(32),
-                                description VARCHAR(128)
+                                description TEXT
         );"""
         bot_settings = """ CREATE TABLE IF NOT EXISTS BOTSETTINGS (
                                 botId INTEGER PRIMARY KEY AUTOINCREMENT,
                                 botUsername VARCHAR(32),
                                 botNick VARCHAR(32),
-                                botRealname VARCHAR(128),
-                                botAway VARCHAR(255),
+                                botRealname TEXT,
+                                botAway TEXT,
                                 bornTime TIMESTAMP,
                                 maxConnectTime TIMESTAMP,
                                 maxUptime TIMESTAMP
@@ -714,13 +741,25 @@ class SQL:
                 userId INTEGER,
                 nick TEXT,
                 host TEXT,
-                success INTEGER NOT NULL,  -- 1 = success, 0 = failure
+                success INTEGER NOT NULL,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
 
                 FOREIGN KEY (botId) REFERENCES BOTSETTINGS(botId),
                 FOREIGN KEY (userId) REFERENCES USERS(id)
             );
             """
+
+        ignores = """
+            CREATE TABLE IF NOT EXISTS IGNORES (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            botId INTEGER NOT NULL,
+            host TEXT,
+            added TIMESTAMP,
+            expires TIMESTAMP,
+            reason TEXT,
+            FOREIGN KEY (botId) REFERENCES BOTSETTINGS(botId)
+            )
+        """
 
         self.sqlite3_execute(bot_settings)
         self.sqlite3_execute(valid_settings)
@@ -733,4 +772,5 @@ class SQL:
         self.sqlite3_execute(channel_access)
         self.sqlite3_execute(global_access)
         self.sqlite3_execute(user_logins)
+        self.sqlite3_execute(ignores)
 ###
