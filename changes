@@ -34,12 +34,16 @@
 # solved issue regarding QUIT with message
 # solved issue regarding not knowing if the bot has a status mode on channel
 # added !myset autologin <on>/<off> to enable, disable autologin, by default is enabled
----
+# added deauth command
 # added ignores sql table
+# solved issue regarding max uptime, max connect time
+# removed some variables from Variables.py and added to self object
+---
+
 # to implement ignore expire !!!!
 
-# to implement autoupdate
-# to add deauth !! to solve !!
+# to implement autoupdate timer
+
 # to add addhost, delhost !! to solve !!
 # to add adduser !! to solve !!
 

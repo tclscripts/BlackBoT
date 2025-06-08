@@ -254,20 +254,27 @@ class SQL:
             return True
         return False
 
-    def sqlite_update_uptime(self, botId):  # update best uptime, ontime
-        # update max uptime, if necesary
+    def sqlite_update_uptime(self, selfbot, botId):
         while True:
             timestamp = time.time()
-            dif_max_uptime = timestamp - v.current_start_time
-            if dif_max_uptime > self.sqlite_get_max_uptime(botId):
-                query = "UPDATE BOTSETTINGS set maxUptime = ? where botId = ?"
-                self.sqlite3_insert(query, (dif_max_uptime, botId))
-            # update max connect time, if necesary
-            if v.connected:
-                dif_max_connect = timestamp - v.current_connect_time
-                if dif_max_connect > self.sqlite_get_max_ontime(botId):
-                    query = "UPDATE BOTSETTINGS set maxConnectTime = ? where botId = ?"
-                    self.sqlite3_insert(query, (dif_max_connect, botId))
+            uptime_duration = int(timestamp - selfbot.current_start_time) if selfbot.current_start_time else 0
+            connect_duration = int(timestamp - selfbot.current_connect_time) if selfbot.current_connect_time else 0
+
+            current_max_uptime = self.sqlite_get_max_uptime(botId)
+            current_max_connect = self.sqlite_get_max_ontime(botId)
+
+            if uptime_duration > current_max_uptime:
+                self.sqlite3_insert(
+                    "UPDATE BOTSETTINGS SET maxUptime = ? WHERE botId = ?",
+                    (uptime_duration, botId)
+                )
+
+            if selfbot.connected and connect_duration > current_max_connect:
+                self.sqlite3_insert(
+                    "UPDATE BOTSETTINGS SET maxConnectTime = ? WHERE botId = ?",
+                    (connect_duration, botId)
+                )
+
             time.sleep(60)
 
     def sqlite_get_max_uptime(self, botId):  # get maximum uptime
@@ -730,8 +737,8 @@ class SQL:
                                 botRealname TEXT,
                                 botAway TEXT,
                                 bornTime TIMESTAMP,
-                                maxConnectTime TIMESTAMP,
-                                maxUptime TIMESTAMP
+                                maxConnectTime INTEGER,
+                                maxUptime INTEGER
         );"""
 
         user_logins = """

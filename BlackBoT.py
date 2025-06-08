@@ -51,7 +51,10 @@ current_instance = None
 
 class Bot(irc.IRCClient):
     def __init__(self, nickname, realname):
-        global current_start_time
+        self.current_connect_time = 0
+        self.current_start_time = 0
+        self.recover_nick_timer_start = False
+        self.connected = False
         self.channel_details = []
         self.nickname = nickname
         self.realname = realname
@@ -71,7 +74,7 @@ class Bot(irc.IRCClient):
         self.user_cache = {}  # {(nick, host): userId}
         # ignore on flood via private messages
         self.flood_tracker = defaultdict(lambda: deque())
-        v.current_start_time = time.time()
+        self.current_start_time = time.time()
         sql_instance = SQL.SQL(s.sqlite3_database)
         sql_instance.sqlite3_createTables()
         self.sqlite3_database = s.sqlite3_database
@@ -83,7 +86,7 @@ class Bot(irc.IRCClient):
         self.thread_check_for_changed_nick = threading.Thread(target=self.recover_nickname)
         self.thread_check_for_changed_nick.daemon = True
         # uptime & ontime update thread
-        self.thread_update_uptime = threading.Thread(target=sql_instance.sqlite_update_uptime, args=(self.botId,))
+        self.thread_update_uptime = threading.Thread(target=sql_instance.sqlite_update_uptime, args=(self, self.botId,))
         self.thread_update_uptime.daemon = True
         self.thread_update_uptime.start()
 
@@ -123,8 +126,8 @@ class Bot(irc.IRCClient):
             self.known_users.clear()
             self.user_cache.clear()
         sql_instance = SQL.SQL(self.sqlite3_database)
-        v.connected = True
-        v.current_connect_time = time.time()
+        self.connected = True
+        self.current_connect_time = time.time()
         self.sendLine("AWAY :" + s.away)
         if self.newbot[0] == 0:  # new bot
             print(f"{self.nickname} is a new bot, joining it's default channels and saving them.")
@@ -454,11 +457,11 @@ class Bot(irc.IRCClient):
                 print(f"🔐 Auto-login: {wnickname} (userId={userId}) from {host}")
 
     def irc_ERR_NICKNAMEINUSE(self, prefix, params):
-        if self.nick_already_in_use == 1 and v.recover_nick_timer_start is False:
+        if self.nick_already_in_use == 1 and self.recover_nick_timer_start is False:
             self.setNick(s.altnick)
-            v.recover_nick_timer_start = True
+            self.recover_nick_timer_start = True
             return
-        elif v.recover_nick_timer_start:
+        elif self.recover_nick_timer_start:
             return
         else:
             print(f"Nickname {s.nickname} is already in use, switching to alternative nick..")
@@ -702,7 +705,7 @@ class Bot(irc.IRCClient):
                     self.nickname = s.nickname
                     self.stop_recover_nick = True
                     self.nick_already_in_use = 0
-                    v.recover_nick_timer_start = False
+                    self.recover_nick_timer_start = False
                     print(f"Regained my main nick name {s.nickname}")
             time.sleep(5)
 

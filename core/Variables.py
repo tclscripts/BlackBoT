@@ -80,11 +80,3 @@ users_settings = ['lastseen', 'lastSeenOn']
 
 # Users settings allowed to be changed
 users_settings_change = ['email', 'greet', 'autologin']
-
-########################################################################################################################
-#  do not change these variables
-current_start_time = 0
-current_connect_time = 0
-connected = False
-recover_nick_timer_start = False
-#
