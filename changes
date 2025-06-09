@@ -38,6 +38,7 @@
 # added ignores sql table
 # solved issue regarding max uptime, max connect time
 # removed some variables from Variables.py and added to self object
+# added self flood protection for the robot via command channel, private or CTCP
 ---
 
 # to implement ignore expire !!!!

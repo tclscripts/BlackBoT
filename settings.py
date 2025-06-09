@@ -70,7 +70,7 @@ maxAttemptRejoin = 5
 private_flood_limit = "3:5"
 
 # Ignore time (minutes)
-private_flood_time = 5
+private_flood_time = 2
 
 # ───────────────────────────────────────────────
 # Database

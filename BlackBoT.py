@@ -223,8 +223,8 @@ class Bot(irc.IRCClient):
     def cleanup_ignores(self):
         sql = SQL.SQL(self.sqlite3_database)
         while True:
-            time.sleep(60)
             sql.sqlite_cleanup_ignores()
+            time.sleep(60)
 
     def check_private_flood_prot(self, host):
         sql = SQL.SQL(self.sqlite3_database)
@@ -589,12 +589,6 @@ class Bot(irc.IRCClient):
         return ""
 
     def privmsg(self, user, channel, msg):
-        # Detectare YouTube
-        if channel.startswith("#"):
-            video_id = yt.YoutubeTitle.extract_youtube_id(msg)
-            if video_id:
-                yt_info = yt.YoutubeTitle.get_video_info(video_id)
-                self.send_message(channel, yt_info)
         nick = user.split("!")[0]
         host = user.split("!")[1]
         args = msg.split()
@@ -604,13 +598,13 @@ class Bot(irc.IRCClient):
         is_private = (channel.lower() == self.nickname.lower())
         is_nick_cmd = False
         is_other_chan = False
+        lhost = self.get_hostname(nick, f"{host}", 0)
 
         if not args:
             return
 
         # if is private message
         if is_private:
-            lhost = self.get_hostname(nick, f"{host}", 0)
             if self.check_private_flood_prot(lhost):
                 return
             feedback = nick
@@ -641,6 +635,9 @@ class Bot(irc.IRCClient):
                         is_other_chan = True
                 else:
                     return
+
+        if self.check_private_flood_prot(lhost):
+            return
 
         if self.valid_command(command):
             proc = self.get_process(command)
