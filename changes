@@ -48,13 +48,14 @@
 # implemented ignore expiration if bot is flooded
 # solved issue related to clean logged in users
 # implemented autoupdate check and start on command
+# added auto message splitter if its bigger than 450 chars
+# added message delay to protect the bot from excess flood while messaging
 ----------------------------------------------------------------------------------
 
 To implement list:
 
 # to implement autoupdate timer
-
-# to add addhost, delhost !! to solve !!
-# to add adduser !! to solve !!
+# to add addhost, delhost
+# to add adduser
 
 

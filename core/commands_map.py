@@ -46,5 +46,7 @@ command_definitions = [
     {'name': 'myset', 'description': 'Valid users can set their user settings',
      'flags': '-', 'id': '28'},
     {'name': 'update', 'description': 'Update command used to check for updates or start update',
-     'flags': 'N', 'id': '29'}
+     'flags': 'N', 'id': '29'},
+    {'name': 'status', 'description': 'Get info about bot\'s internal stuff',
+     'flags': 'Nn', 'id': '30'}
 ]

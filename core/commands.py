@@ -11,6 +11,57 @@ import settings as s
 import Variables as v
 
 
+def cmd_status(self, channel, feedback, nick, host, msg):
+    import gc
+    result = self.check_command_access(channel, nick, host, '30', feedback)
+    if not result:
+        return
+
+    now = time.time()
+    process = psutil.Process(os.getpid())
+
+    # Basic system info
+    uptime = now - process.create_time()
+    formatted_uptime = self.format_duration(uptime)
+    cpu_percent = process.cpu_percent(interval=0.5)
+    mem_info = process.memory_info()
+    rss_mb = mem_info.rss / (1024 * 1024)
+    total_mem_mb = psutil.virtual_memory().total / (1024 * 1024)
+    system = platform.system()
+    release = platform.release()
+    cpu_model = platform.processor()
+
+    # Thread info
+    threads = threading.enumerate()
+    num_threads = len(threads)
+    thread_names = ", ".join(t.name for t in threads)
+
+    # Internal memory states
+    users_logged = len(self.logged_in_users)
+    known_users = len(self.known_users)
+    user_cache = len(self.user_cache)
+    pending_rejoins = len(self.rejoin_pending)
+    channel_info = len(self.channel_details)
+
+    # GC total objects (optional)
+    total_objects = len(gc.get_objects())
+
+    # Compose message
+    msg_lines = [
+        f"📊 *Advanced Status Report*",
+        f"🔢 Threads: {num_threads} — {thread_names}",
+        f"👥 Logged Users: {users_logged} | 🧠 Known: {known_users} | 🔐 Cache: {user_cache}",
+        f"🔁 Rejoin Queue: {pending_rejoins} | 📺 Channel Details: {channel_info}",
+        f"📦 GC Objects: {total_objects}",
+        f"🧠 RAM: {rss_mb:.2f}MB / {total_mem_mb:.0f}MB | 🔄 CPU: {cpu_percent:.1f}%",
+        f"💻 System: {system} {release} | CPU: {cpu_model}",
+        f"⏱️ Uptime: {formatted_uptime}",
+    ]
+
+    for line in msg_lines:
+        self.send_message(feedback, line)
+
+
 def cmd_myset(self, channel, feedback, nick, host, msg):
     parts = msg.strip().split(None, 1)
 

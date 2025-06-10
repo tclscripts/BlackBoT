@@ -73,6 +73,20 @@ private_flood_limit = "5:3"
 private_flood_time = 2
 
 # ───────────────────────────────────────────────
+# Delayed message queue (anti-flood mechanism)
+# ───────────────────────────────────────────────
+
+# Number of seconds
+message_delay = 1
+
+# ───────────────────────────────────────────────
+# Automatically splits long bot messages into safe IRC-sized lines
+# ───────────────────────────────────────────────
+
+# Maximum number of chars
+message_max_chars = 450
+
+# ───────────────────────────────────────────────
 # Database
 # ───────────────────────────────────────────────
 

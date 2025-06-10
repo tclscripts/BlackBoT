@@ -7,6 +7,7 @@ import ipaddress
 import ssl
 import os
 import re
+import queue
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'core'))
 
@@ -15,7 +16,6 @@ from core import Variables as v
 from core import SQL
 import Starter
 import settings as s
-from modules import YoutubeTitle as yt
 from collections import defaultdict, deque
 
 try:
@@ -105,6 +105,12 @@ class Bot(irc.IRCClient):
         self.thread_ignore_cleanup = threading.Thread(target=self.cleanup_ignores)
         self.thread_ignore_cleanup.daemon = True
         self.thread_ignore_cleanup.start()
+
+        # message queue
+        self.message_queue = queue.Queue()
+        self.message_delay = s.message_delay
+        self.thread_message_sender = threading.Thread(target=self._message_worker, daemon=True)
+        self.thread_message_sender.start()
 
         self.stop_recover_nick = False
 
@@ -226,6 +232,13 @@ class Bot(irc.IRCClient):
         while True:
             sql.sqlite_cleanup_ignores()
             time.sleep(60)
+
+    def _message_worker(self):
+        while True:
+            channel, message = self.message_queue.get()
+            if channel and message:
+                self.msg(channel, message)
+            time.sleep(self.message_delay)
 
     def check_private_flood_prot(self, host):
         sql = SQL.SQL(self.sqlite3_database)
@@ -659,9 +672,9 @@ class Bot(irc.IRCClient):
                 self.send_message(feedback, f"🛠️ Execution error → {e}")
 
     def send_message(self, channel, message):
-        for line in message.split("\n"):
-            if line.strip():
-                self.msg(channel, line)
+        for part in self.split_irc_message_strings(message):
+            if part.strip():
+                self.message_queue.put((channel, part))
 
     def send_notice(self, channel, message):
         for line in message.split("\n"):
@@ -674,7 +687,7 @@ class Bot(irc.IRCClient):
     def format_duration(self, seconds):
         return str(datetime.timedelta(seconds=int(seconds)))
 
-    # split message in parts
+    # split message in parts (for lists, with separator)
     def split_irc_message_parts(self, entries, separator=", ", max_length=450):
         messages = []
         current_msg = ""
@@ -689,6 +702,23 @@ class Bot(irc.IRCClient):
             messages.append(current_msg.strip(separator))
 
         return messages
+
+    # split message in strings
+    def split_irc_message_strings(self, message, limit=s.message_max_chars):
+        lines = []
+        for paragraph in message.split("\n"):
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            while len(paragraph) > limit:
+                split_at = paragraph.rfind(' ', 0, limit)
+                if split_at == -1:
+                    split_at = limit
+                lines.append(paragraph[:split_at])
+                paragraph = paragraph[split_at:].lstrip()
+            if paragraph:
+                lines.append(paragraph)
+        return lines
 
     # CTCP version reply
     def ctcpQuery_VERSION(self, user, message, a):
