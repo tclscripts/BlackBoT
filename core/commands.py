@@ -3,13 +3,15 @@ import time
 from core import update
 import settings as s
 import Variables as v
+import gc
+import threading
+import platform
+import bcrypt
+import os
+import psutil
+from datetime import datetime
 
 def cmd_status(self, channel, feedback, nick, host, msg):
-    import gc
-    import os
-    import psutil
-    import threading
-    import platform
     result = self.check_command_access(channel, nick, host, '30', feedback)
     if not result:
         return
@@ -138,7 +140,6 @@ def cmd_update(self, channel, feedback, nick, host, msg):
 
 
 def cmd_auth(self, channel, feedback, nick, host, msg):
-    import bcrypt
     parts = msg.strip().split()
     if not parts:
         self.send_message(feedback, "⚠️ Usage: auth <username> <password>")
@@ -219,7 +220,6 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
 
 
 def cmd_newpass(self, channel, feedback, nick, host, msg):
-    import bcrypt
     sql = SQL(self.sqlite3_database)
     info = sql.sqlite_handle(self.botId, nick, host)
     if not info:
@@ -247,7 +247,6 @@ def cmd_newpass(self, channel, feedback, nick, host, msg):
 
 
 def cmd_pass(self, channel, feedback, nick, host, msg):
-    import bcrypt
     sql = SQL(self.sqlite3_database)
     info = sql.sqlite_handle(self.botId, nick, host)
     if not info:
@@ -275,9 +274,6 @@ def cmd_pass(self, channel, feedback, nick, host, msg):
 
 
 def cmd_uptime(self, channel, feedback, nick, host, msg):
-    import os
-    import psutil
-    import platform
     result = self.check_command_access(channel, nick, host, '10', feedback)
     if not result:
         return
@@ -444,7 +440,6 @@ def cmd_hdeop(self, channel, feedback, nick, host, msg):
 
 
 def cmd_restart(self, channel, feedback, nick, host, msg):
-    import threading
     result = self.check_command_access(channel, nick, host, '6', feedback)
     if not result:
         return
@@ -473,7 +468,6 @@ def cmd_rehash(self, channel, feedback, nick, host, msg):
 
 
 def cmd_die(self, channel, feedback, nick, host, msg):
-    import threading
     result = self.check_command_access(channel, nick, host, '7', feedback)
     if not result:
         return
@@ -782,8 +776,6 @@ def cmd_del(self, channel, feedback, nick, host, msg):
 
 def cmd_info(self, channel, feedback, nick, host, msg):
     global thost_mask
-    from datetime import datetime
-
     if channel.lower() == self.nickname.lower():
         self.send_message(feedback, "⚠️ Usage: info <#channel|user>")
         return
