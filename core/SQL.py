@@ -3,7 +3,7 @@ import sqlite3
 from sqlite3 import Error
 import Variables as v
 import re
-import datetime
+
 
 
 ##
@@ -539,6 +539,7 @@ class SQL:
         return [row[0] for row in self.sqlite_select(query, (botId, flag))]
 
     def sqlite_add_channel_access(self, botId, channel, userId, accessId, addedBy):
+        import datetime
         chan_id_query = "SELECT id FROM CHANNELS WHERE botId = ? AND channelName COLLATE NOCASE = ?"
         channelId = self.sqlite_select(chan_id_query, (botId, channel))
 
