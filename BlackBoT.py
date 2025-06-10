@@ -63,6 +63,7 @@ class Bot(irc.IRCClient):
         self.username = s.username
         self.newbot = 0
         self.botId = 0
+        self.ignore_cleanup_started = False
         self.nick_already_in_use = 0
         self.channels = []
         self.multiple_logins = s.multiple_logins
@@ -73,7 +74,6 @@ class Bot(irc.IRCClient):
         self.logged_in_users = {}
         self.known_users = set()  # (channel, nick)
         self.user_cache = {}  # {(nick, host): userId}
-        # ignore on flood via private messages
         self.flood_tracker = defaultdict(lambda: deque())
         self.current_start_time = time.time()
         sql_instance = SQL.SQL(s.sqlite3_database)
@@ -86,6 +86,7 @@ class Bot(irc.IRCClient):
         # nick regain thread
         self.thread_check_for_changed_nick = threading.Thread(target=self.recover_nickname)
         self.thread_check_for_changed_nick.daemon = True
+
         # uptime & ontime update thread
         self.thread_update_uptime = threading.Thread(target=sql_instance.sqlite_update_uptime, args=(self, self.botId,))
         self.thread_update_uptime.daemon = True
@@ -102,9 +103,11 @@ class Bot(irc.IRCClient):
         self.thread_known_users_cleanup.start()
 
         # remove expired ignores
-        self.thread_ignore_cleanup = threading.Thread(target=self.cleanup_ignores)
-        self.thread_ignore_cleanup.daemon = True
-        self.thread_ignore_cleanup.start()
+        if sql_instance.sqlite_has_active_ignores(self.botId):
+            print("⏳ Active ignores found. Starting cleanup thread...")
+            self.thread_ignore_cleanup = threading.Thread(target=self.cleanup_ignores)
+            self.thread_ignore_cleanup.daemon = True
+            self.thread_ignore_cleanup.start()
 
         # message queue
         self.message_queue = queue.Queue()
@@ -227,10 +230,22 @@ class Bot(irc.IRCClient):
             'reason': reason
         }
 
+    def start_ignore_cleanup_if_needed(self):
+        if not self.ignore_cleanup_started:
+            print("🧹 Starting ignore cleanup thread...")
+            self.thread_ignore_cleanup = threading.Thread(target=self.cleanup_ignores)
+            self.thread_ignore_cleanup.daemon = True
+            self.thread_ignore_cleanup.start()
+            self.ignore_cleanup_started = True
+
     def cleanup_ignores(self):
         sql = SQL.SQL(self.sqlite3_database)
         while True:
             sql.sqlite_cleanup_ignores()
+            if not sql.sqlite_has_active_ignores(self.botId):
+                print("🛑 No more active ignores. Cleanup thread exiting.")
+                self.ignore_cleanup_started = False
+                break
             time.sleep(60)
 
     def _message_worker(self):
@@ -255,7 +270,7 @@ class Bot(irc.IRCClient):
         if len(self.flood_tracker[host]) > limit:
             print(f"⚠️ Flood detected from {host}, blacklisting...")
             reason = f"Flooding bot (>{limit}/{interval}s)"
-            sql.sqlite_add_ignore(self.botId, host, s.private_flood_time * 60, reason)
+            sql.sqlite_add_ignore(self, self.botId, host, s.private_flood_time * 60, reason)
             return True
 
         return False

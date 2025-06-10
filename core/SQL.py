@@ -75,7 +75,17 @@ class SQL:
             connection.close()
         return result
 
-    def sqlite_add_ignore(self, botId, host, duration_seconds, reason):
+    def sqlite_has_active_ignores(self, botId):
+        now = int(time.time())
+        query = """
+            SELECT 1 FROM IGNORES
+            WHERE botId = ? AND expires > ?
+            LIMIT 1
+        """
+        result = self.sqlite_select(query, (botId, now))
+        return bool(result)
+
+    def sqlite_add_ignore(self, selfbot, botId, host, duration_seconds, reason):
         now = int(time.time())
         expires = now + duration_seconds
         query = """
@@ -83,8 +93,8 @@ class SQL:
             VALUES (?, ?, ?, ?, ?)
         """
         self.sqlite3_insert(query, [botId, host, now, expires, reason])
+        selfbot.start_ignore_cleanup_if_needed()
 
-    # Verifică dacă un host este ignorat
     def sqlite_is_ignored(self, botId, host):
         now = int(time.time())
         query = """

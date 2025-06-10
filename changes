@@ -50,6 +50,7 @@
 # implemented autoupdate check and start on command
 # added auto message splitter if its bigger than 450 chars
 # added message delay to protect the bot from excess flood while messaging
+# added autostart and autostop for ignore removal thread
 ----------------------------------------------------------------------------------
 
 To implement list:
