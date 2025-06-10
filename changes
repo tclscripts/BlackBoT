@@ -51,6 +51,7 @@
 # added auto message splitter if its bigger than 450 chars
 # added message delay to protect the bot from excess flood while messaging
 # added autostart and autostop for ignore removal thread
+# added some imports into functions to have some memory benefits
 ----------------------------------------------------------------------------------
 
 To implement list:
