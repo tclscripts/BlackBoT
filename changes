@@ -1,3 +1,9 @@
+#########################################################################
+#
+# Things done so far....
+#
+#########################################################################
+
 # added auto rejoin throttle for bot
 # added auto suspend channel if cannot join
 # thread to recover main nick when available
@@ -39,9 +45,12 @@
 # solved issue regarding max uptime, max connect time
 # removed some variables from Variables.py and added to self object
 # added self flood protection for the robot via command channel, private or CTCP
----
+# implemented ignore expiration if bot is flooded
+# solved issue related to clean logged in users
+# implemented autoupdate check and start on command
+----------------------------------------------------------------------------------
 
-# to implement ignore expire !!!!
+To implement list:
 
 # to implement autoupdate timer
 

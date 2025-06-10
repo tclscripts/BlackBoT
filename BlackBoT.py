@@ -49,6 +49,7 @@ servers_order = 0
 channelStatusChars = "~@+%"
 current_instance = None
 
+
 class Bot(irc.IRCClient):
     def __init__(self, nickname, realname):
         self.current_connect_time = 0
@@ -297,8 +298,10 @@ class Bot(irc.IRCClient):
             if not updated_hosts:
                 to_remove.append(userId)
             else:
-                self.logged_in_users[userId] = updated_hosts
-
+                self.logged_in_users[userId] = {
+                    **data,
+                    "hosts": updated_hosts
+                }
         for userId in to_remove:
             del self.logged_in_users[userId]
             print(f"🔒 Auto-logout (netsplit or left): userId={userId}")
@@ -671,7 +674,7 @@ class Bot(irc.IRCClient):
     def format_duration(self, seconds):
         return str(datetime.timedelta(seconds=int(seconds)))
 
-    #split message in parts
+    # split message in parts
     def split_irc_message_parts(self, entries, separator=", ", max_length=450):
         messages = []
         current_msg = ""

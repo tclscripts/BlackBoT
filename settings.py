@@ -66,8 +66,8 @@ maxAttemptRejoin = 5
 # Private flood protection
 # ───────────────────────────────────────────────
 
-# Format: max:seconds (e.g., 3 messages in 5 seconds)
-private_flood_limit = "3:5"
+# Format: max:seconds (e.g., 5 messages in 3 seconds)
+private_flood_limit = "5:3"
 
 # Ignore time (minutes)
 private_flood_time = 2

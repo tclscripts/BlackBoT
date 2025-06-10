@@ -44,5 +44,7 @@ command_definitions = [
     {'name': 'deauth', 'description': 'Deauthenticate yourself.',
      'flags': '-', 'id': '27'},
     {'name': 'myset', 'description': 'Valid users can set their user settings',
-     'flags': '-', 'id': '28'}
+     'flags': '-', 'id': '28'},
+    {'name': 'update', 'description': 'Update command used to check for updates or start update',
+     'flags': 'N', 'id': '29'}
 ]
