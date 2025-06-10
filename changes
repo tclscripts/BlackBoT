@@ -56,8 +56,8 @@
 
 To implement list:
 
+# to solve issue related to reload imports uppon rehash
 # to implement autoupdate timer
 # to add addhost, delhost
 # to add adduser
-
 
