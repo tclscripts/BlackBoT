@@ -42,16 +42,38 @@ def parse_settings(file_path):
 
 
 def merge_settings(old_settings, new_settings_content):
-    lines = new_settings_content.splitlines()
     merged = []
-    for line in lines:
-        match = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+)", line)
+    seen_vars = set()
+
+    for line in new_settings_content.splitlines():
+        stripped = line.strip()
+
+        # Comentariu sau linie goală → păstrează ca atare
+        if not stripped or stripped.startswith("#"):
+            merged.append(line)
+            continue
+
+        # Linie cu variabilă?
+        match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+)", line)
         if match:
-            var = match.group(1)
+            var, new_value = match.groups()
+            seen_vars.add(var)
+
             if var in old_settings:
-                line = f"{var} = {old_settings[var]}"
-        merged.append(line)
+                comment_split = line.split("#", 1)
+                comment = f" # {comment_split[1].strip()}" if len(comment_split) > 1 else ""
+                merged.append(f"{var} = {old_settings[var]}{comment}")
+            else:
+                merged.append(line)
+        else:
+            merged.append(line)
+
+    for var in old_settings:
+        if var not in seen_vars:
+            merged.append(f"{var} = {old_settings[var]}")
+
     return "\n".join(merged)
+
 
 
 def update_from_github(self, feedback):
