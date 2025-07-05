@@ -48,12 +48,10 @@ def merge_settings(old_settings, new_settings_content):
     for line in new_settings_content.splitlines():
         stripped = line.strip()
 
-        # Comentariu sau linie goală → păstrează ca atare
         if not stripped or stripped.startswith("#"):
             merged.append(line)
             continue
 
-        # Linie cu variabilă?
         match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+)", line)
         if match:
             var, new_value = match.groups()
