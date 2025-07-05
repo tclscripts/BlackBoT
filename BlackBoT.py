@@ -285,10 +285,19 @@ class Bot(irc.IRCClient):
         if not s.nickserv_login_enabled or not s.nickserv_password:
             return
         try:
-            self.sendLine(f"PRIVMSG {s.nickserv_nick} :IDENTIFY {s.nickserv_password}".encode('utf-8'))
+            self.sendLine(f"PRIVMSG {s.nickserv_nick} :IDENTIFY {s.nickserv_password}")
             print(f"🔐 Sent IDENTIFY to {s.nickserv_nick}")
         except Exception as e:
             print(f"❌ Failed to IDENTIFY to {s.nickserv_nick}: {e}")
+
+    def start_ignore_cleanup_if_needed(self):
+        if not self.ignore_cleanup_started:
+            sql_instance = SQLManager.get_instance()
+            if sql_instance.sqlite_has_active_ignores(self.botId):
+                print("⏳ Active ignores found. Starting cleanup thread...")
+                self.thread_ignore_cleanup = ThreadWorker(target=self.cleanup_ignores, name="ignore_cleanup")
+                self.thread_ignore_cleanup.start()
+                self.ignore_cleanup_started = True
 
     def _message_worker(self):
         while True:
