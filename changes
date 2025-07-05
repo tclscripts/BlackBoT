@@ -52,12 +52,7 @@
 # added message delay to protect the bot from excess flood while messaging
 # added autostart and autostop for ignore removal thread
 # added some imports into functions to have some memory benefits
+# solved issue related to reload imports uppon rehash
+# implemented autoupdate timer
 ----------------------------------------------------------------------------------
-
-To implement list:
-
-# to solve issue related to reload imports uppon rehash
-# to implement autoupdate timer
-# to add addhost, delhost
-# to add adduser
 

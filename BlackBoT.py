@@ -8,7 +8,9 @@ import ssl
 import os
 import re
 import queue
+import logging
 
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 sys.path.append(os.path.join(os.path.dirname(__file__), 'core'))
 
 from core import commands
@@ -17,11 +19,12 @@ from core import SQL
 import Starter
 import settings as s
 from collections import defaultdict, deque
+from core.commands_map import command_definitions
 
 try:
     import pkg_resources
 except ImportError:
-    print("setuptools not found. Installing setuptools...")
+    logging.info("setuptools not found. Installing setuptools...")
     subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'setuptools'])
     import pkg_resources
 
@@ -35,7 +38,7 @@ if missing:
         subprocess.check_call([python, '-m', 'pip', 'install', *missing],
                               stdout=subprocess.DEVNULL)
     except subprocess.CalledProcessError as e:
-        print(f"Failed to install required packages: {e}")
+        logging.error(f"Failed to install required packages: {e}")
         sys.exit(1)
 
 from twisted.internet import protocol, ssl, reactor
@@ -50,8 +53,48 @@ channelStatusChars = "~@+%"
 current_instance = None
 
 
+# ───────────────────────────────────────────────
+# Thread Worker with stop support
+# ───────────────────────────────────────────────
+
+thread_stop_events = {}
+
+
+class ThreadWorker(threading.Thread):
+    def __init__(self, target, name):
+        super().__init__(target=target, name=name)
+        self.name = name
+        self.daemon = True
+        thread_stop_events[name] = threading.Event()
+
+    def stop(self):
+        thread_stop_events[self.name].set()
+
+    def reset(self):
+        thread_stop_events[self.name].clear()
+
+    def should_stop(self):
+        return thread_stop_events[self.name].is_set()
+
+def stop_all_threads(self):
+    for name, event in thread_stop_events.items():
+        event.set()
+
+# Singleton SQL instance
+class SQLManager:
+    _instance = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = SQL.SQL(s.sqlite3_database)
+            cls._instance.sqlite3_createTables()
+        return cls._instance
+
+
 class Bot(irc.IRCClient):
     def __init__(self, nickname, realname):
+        self.commands = None
         self.current_connect_time = 0
         self.current_start_time = 0
         self.recover_nick_timer_start = False
@@ -72,50 +115,46 @@ class Bot(irc.IRCClient):
         self.rejoin_pending = {}
         # logged users
         self.logged_in_users = {}
+        self.clean_logged_users(silent=True)
+        self.thread_check_logged_users_started = False
         self.known_users = set()  # (channel, nick)
         self.user_cache = {}  # {(nick, host): userId}
         self.flood_tracker = defaultdict(lambda: deque())
         self.current_start_time = time.time()
-        sql_instance = SQL.SQL(s.sqlite3_database)
-        sql_instance.sqlite3_createTables()
+        sql_instance = SQLManager.get_instance()
         self.sqlite3_database = s.sqlite3_database
         self.newbot = sql_instance.sqlite3_bot_birth(self.username, self.nickname, self.realname,
                                                      self.away)
         self.botId = self.newbot[1]
 
-        # nick regain thread
-        self.thread_check_for_changed_nick = threading.Thread(target=self.recover_nickname)
-        self.thread_check_for_changed_nick.daemon = True
-
-        # uptime & ontime update thread
-        self.thread_update_uptime = threading.Thread(target=sql_instance.sqlite_update_uptime, args=(self, self.botId,))
-        self.thread_update_uptime.daemon = True
+        # ⏱️ Uptime update thread
+        self.thread_update_uptime = ThreadWorker(
+            target=lambda: sql_instance.sqlite_update_uptime(self, self.botId),
+            name="uptime"
+        )
         self.thread_update_uptime.start()
 
-        # auto deauth for logged users
-        self.thread_check_logged_users = threading.Thread(target=self._check_logged_users_loop)
-        self.thread_check_logged_users.daemon = True
-        self.thread_check_logged_users.start()
-
-        # remove known users
-        self.thread_known_users_cleanup = threading.Thread(target=self.cleanup_known_users)
-        self.thread_known_users_cleanup.daemon = True
+        # 👥 Known users cleanup thread
+        self.thread_known_users_cleanup = ThreadWorker(target=self.cleanup_known_users, name="known_users")
         self.thread_known_users_cleanup.start()
 
-        # remove expired ignores
+        # 🚫 Ignore cleanup thread (doar dacă sunt active)
         if sql_instance.sqlite_has_active_ignores(self.botId):
             print("⏳ Active ignores found. Starting cleanup thread...")
-            self.thread_ignore_cleanup = threading.Thread(target=self.cleanup_ignores)
-            self.thread_ignore_cleanup.daemon = True
+            self.thread_ignore_cleanup = ThreadWorker(target=self.cleanup_ignores, name="ignore_cleanup")
             self.thread_ignore_cleanup.start()
 
-        # message queue
+        # 💬 Message sender thread
         self.message_queue = queue.Queue()
         self.message_delay = s.message_delay
-        self.thread_message_sender = threading.Thread(target=self._message_worker, daemon=True)
+        self.thread_message_sender = ThreadWorker(target=self._message_worker, name="message_sender")
         self.thread_message_sender.start()
 
-        self.stop_recover_nick = False
+        self.thread_check_for_changed_nick = ThreadWorker(target=self.recover_nickname, name="recover_nick")
+
+        if s.autoUpdateEnabled:
+            self.thread_auto_update = ThreadWorker(target=self.auto_update_check_loop, name="auto_update")
+            self.thread_auto_update.start()
 
         if sql_instance.sqlite_isBossOwner(self.botId) > 0:
             self.unbind_hello = True
@@ -135,7 +174,7 @@ class Bot(irc.IRCClient):
             print("🔄 Resetting user caches.")
             self.known_users.clear()
             self.user_cache.clear()
-        sql_instance = SQL.SQL(self.sqlite3_database)
+        sql_instance = SQLManager.get_instance()
         self.connected = True
         self.current_connect_time = time.time()
         self.sendLine("AWAY :" + s.away)
@@ -230,17 +269,9 @@ class Bot(irc.IRCClient):
             'reason': reason
         }
 
-    def start_ignore_cleanup_if_needed(self):
-        if not self.ignore_cleanup_started:
-            print("🧹 Starting ignore cleanup thread...")
-            self.thread_ignore_cleanup = threading.Thread(target=self.cleanup_ignores)
-            self.thread_ignore_cleanup.daemon = True
-            self.thread_ignore_cleanup.start()
-            self.ignore_cleanup_started = True
-
     def cleanup_ignores(self):
         sql = SQL.SQL(self.sqlite3_database)
-        while True:
+        while not thread_stop_events["ignore_cleanup"].is_set():
             sql.sqlite_cleanup_ignores()
             if not sql.sqlite_has_active_ignores(self.botId):
                 print("🛑 No more active ignores. Cleanup thread exiting.")
@@ -312,12 +343,21 @@ class Bot(irc.IRCClient):
 
     # check logged users to deauth
     def _check_logged_users_loop(self):
+        print("🧠 Logged users monitor thread started.")
         while True:
-            self.clean_logged_users()
+            if not self.logged_in_users:
+                print("✅ No more logged-in users. Monitor thread exiting.")
+                self.thread_check_logged_users_started = False
+                break
+            try:
+                self.clean_logged_users()
+            except Exception as e:
+                print(f"⚠️ Exception in user cleaner thread: {e}")
             time.sleep(3600 * s.autoDeauthTime)
 
-    def clean_logged_users(self):
-        print("🧹 Checking for disconnected logged users...")
+    def clean_logged_users(self, silent=False):
+        if not silent:
+            print("🧹 Checking for disconnected logged users...")
         to_remove = []
         for userId, data in self.logged_in_users.items():
             hosts = data["hosts"]
@@ -486,6 +526,12 @@ class Bot(irc.IRCClient):
                     self.logged_in_users[userId]["hosts"].append(lhost)
                 self.logged_in_users[userId]["nick"] = wnickname
                 print(f"🔐 Auto-login: {wnickname} (userId={userId}) from {host}")
+                if not self.thread_check_logged_users_started:
+                    print("🚀 Starting logged user monitor thread...")
+                    self.thread_check_logged_users = ThreadWorker(target=self._check_logged_users_loop, name="logged_users")
+                    self.thread_check_logged_users.daemon = True
+                    self.thread_check_logged_users.start()
+                    self.thread_check_logged_users_started = True
 
     def irc_ERR_NICKNAMEINUSE(self, prefix, params):
         if self.nick_already_in_use == 1 and self.recover_nick_timer_start is False:
@@ -498,7 +544,8 @@ class Bot(irc.IRCClient):
             print(f"Nickname {s.nickname} is already in use, switching to alternative nick..")
             self.nick_already_in_use = 1
             self.nickname = s.altnick
-            self.thread_check_for_changed_nick.start()
+            if self.nickname != s.nickname:  # start doar dacă e alt nick
+                self.thread_check_for_changed_nick.start()
 
     # check if logged
     def is_logged_in(self, userId, host):
@@ -521,7 +568,7 @@ class Bot(irc.IRCClient):
         entry['attempts'] += 1
 
         if entry['attempts'] > s.maxAttemptRejoin:
-            sql_instance = SQL.SQL(self.sqlite3_database)
+            sql_instance = SQLManager.get_instance()
             print(f"❌ Failed to rejoin {channel} after {s.maxAttemptRejoin} attempts. Suspending the channel.")
             entry = self.rejoin_pending.get(channel, {})
             reason = entry.get('reason', 'unknown')
@@ -533,8 +580,7 @@ class Bot(irc.IRCClient):
         self.join(channel)
 
     def load_commands(self):
-        from core.commands_map import command_definitions
-
+        
         self.commands = []
         for cmd in command_definitions:
             func = getattr(commands, f"cmd_{cmd['name']}", None)
@@ -742,16 +788,11 @@ class Bot(irc.IRCClient):
 
     # thread to recover main nick when available
     def recover_nickname(self):
-        while not self.stop_recover_nick:
+        while not thread_stop_events["recover_nick"].is_set():
+            if self.nickname == s.nickname:
+                break
             if self.nick_already_in_use == 1:
-                if self.nickname != s.nickname:
-                    self.setNick(s.nickname)
-                else:
-                    self.nickname = s.nickname
-                    self.stop_recover_nick = True
-                    self.nick_already_in_use = 0
-                    self.recover_nick_timer_start = False
-                    print(f"Regained my main nick name {s.nickname}")
+                self.setNick(s.nickname)
             time.sleep(5)
 
     def check_access(self, channel, userId, flags):
@@ -858,8 +899,8 @@ class Bot(irc.IRCClient):
         return None
 
     def cleanup_known_users(self):
-        while True:
-            time.sleep(1800)  # 30 minutes
+        while not thread_stop_events["known_users"].is_set():
+            time.sleep(1800)
             active_nick_channel_pairs = set((c[0], c[1]) for c in self.channel_details)
             before = len(self.known_users)
             self.known_users.intersection_update(active_nick_channel_pairs)
@@ -869,22 +910,59 @@ class Bot(irc.IRCClient):
 
     def rehash(self, channel, feedback, nick, host):
         import importlib
-        from core import commands
-        from core import update
-        from core import SQL
-        from core import Variables
+        import sys
+        import gc
+
         result = self.check_command_access(channel, nick, host, '8', feedback)
         if not result:
             return
+
         try:
-            importlib.reload(commands)
-            importlib.reload(update)
-            importlib.reload(SQL)
-            importlib.reload(Variables)
+            self.send_message(feedback, "🔁 Reloading core modules...")
+
+            # Clear old command references
+            self.commands.clear()
+
+            # Reload all important modules
+            modules_to_reload = [
+                'core.commands', 'core.update', 'core.SQL', 'core.Variables', 'settings'
+            ]
+            for mod_name in modules_to_reload:
+                mod = sys.modules.get(mod_name)
+                if mod:
+                    importlib.reload(mod)
+                else:
+                    self.send_message(feedback, f"⚠️ Module not loaded: {mod_name}")
+
             self.load_commands()
-            self.send_message(feedback, "✅ Core files reloaded successfully.")
+
+            import core.SQL as SQL
+            sql_instance = SQLManager.get_instance()
+            sql_instance.selfbot = self
+
+            collected = gc.collect()
+
+            self.send_message(feedback, f"✅ Reloaded successfully. 🧹 {collected} objects collected.")
         except Exception as e:
             self.send_message(feedback, f"❌ Reload failed: {e}")
+
+    def auto_update_check_loop(self):
+        import core.update as update
+
+        while not thread_stop_events["auto_update"].is_set():
+            try:
+                if not s.autoUpdateEnabled:
+                    break
+                local_version = update.read_local_version()
+                remote_version = update.fetch_remote_version()
+                if remote_version and remote_version > local_version:
+                    print(f"🔄 Update found → {remote_version} > {local_version}")
+                    update.update_from_github(self, "Auto-update")
+                    self.restart("🔁 Auto-updated")
+                    break  # Nu mai continua loop-ul, se va reporni
+            except Exception as e:
+                print(f"⚠️ Auto-update thread error: {e}")
+            time.sleep(s.autoUpdateInterval * 60)
 
 
 class BotFactory(protocol.ReconnectingClientFactory):
@@ -910,6 +988,7 @@ class BotFactory(protocol.ReconnectingClientFactory):
         get_server = server_choose_to_connect()
         if s.ssl_use == 1:
             sslContext = ssl.ClientContextFactory()
+            sslContext.method = ssl.PROTOCOL_TLSv1_2
             reactor.connectSSL(get_server[0], int(get_server[1]), BotFactory(s.nickname, s.realname), sslContext)
         else:
             reactor.connectTCP(get_server[0], int(get_server[1]), BotFactory(s.nickname, s.realname))
