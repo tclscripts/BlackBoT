@@ -178,6 +178,8 @@ class Bot(irc.IRCClient):
         self.connected = True
         self.current_connect_time = time.time()
         self.sendLine("AWAY :" + s.away)
+        if s.nickserv_login_enabled:
+            self.login_nickserv()
         if self.newbot[0] == 0:  # new bot
             print(f"{self.nickname} is a new bot, joining it's default channels and saving them.")
             for channel in s.channels:
@@ -278,6 +280,15 @@ class Bot(irc.IRCClient):
                 self.ignore_cleanup_started = False
                 break
             time.sleep(60)
+
+    def login_nickserv(self):
+        if not s.nickserv_login_enabled or not s.nickserv_password:
+            return
+        try:
+            self.sendLine(f"PRIVMSG {s.nickserv_nick} :IDENTIFY {s.nickserv_password}".encode('utf-8'))
+            print(f"🔐 Sent IDENTIFY to {s.nickserv_nick}")
+        except Exception as e:
+            print(f"❌ Failed to IDENTIFY to {s.nickserv_nick}: {e}")
 
     def _message_worker(self):
         while True:

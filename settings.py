@@ -42,6 +42,15 @@ ssl_use = 0                       # Use SSL? 1 = yes, 0 = no
 ssl_cert_file = ""               # Path to client certificate file (e.g., "certs/client.crt")
 ssl_key_file = ""                # Path to client private key file (e.g., "certs/client.key")
 
+
+# ───────────────────────────────────────────────
+# NickServ Login Settings
+# ───────────────────────────────────────────────
+
+nickserv_login_enabled = True             # Enable/disable NickServ login
+nickserv_nick = "NickServ"                # Name of the service (usually "NickServ")
+nickserv_password = "parola_ta_aici"      # Bot's password registered with NickServ
+
 # ───────────────────────────────────────────────
 # Channel Settings
 # ───────────────────────────────────────────────
