@@ -306,6 +306,7 @@ class Bot(irc.IRCClient):
                 self.msg(channel, message)
             time.sleep(self.message_delay)
 
+
     def check_private_flood_prot(self, host):
         sql = SQL.SQL(self.sqlite3_database)
         if sql.sqlite_is_ignored(self.botId, host):
