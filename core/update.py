@@ -9,7 +9,6 @@ import shutil
 import zipfile
 import tempfile
 import requests
-import sys
 import re
 
 GITHUB_REPO = "https://github.com/tclscripts/BlackBoT"

@@ -4,16 +4,13 @@
 # BlackBoT Starter Script
 # ───────────────────────────────────────────────
 
-import settings
 import BlackBoT
+import settings
 from twisted.internet import ssl
 import os
 import sys
 
 old_source = ""
-
-# Custom SSL Context that optionally loads client cert and key
-
 
 class ClientSSLContext(ssl.ClientContextFactory):
     def getContext(self):
@@ -56,6 +53,5 @@ if __name__ == '__main__':
             port,
             BlackBoT.BotFactory(settings.nickname, settings.realname)
         )
-
-    BlackBoT.reactor.run()
     print("🚀 BlackBoT started successfully!")
+    BlackBoT.reactor.run()

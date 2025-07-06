@@ -1,5 +1,4 @@
 import datetime
-import subprocess
 import sys
 import time
 import threading
@@ -9,49 +8,25 @@ import os
 import re
 import queue
 import logging
+import Starter
+import settings as s
+import socket
+from collections import defaultdict, deque
+from core.commands_map import command_definitions
+from twisted.internet import protocol, ssl, reactor
+from twisted.words.protocols import irc
+from scapy.all import conf
+from core import commands
+from core import Variables as v
+from core import SQL
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 sys.path.append(os.path.join(os.path.dirname(__file__), 'core'))
 
-from core import commands
-from core import Variables as v
-from core import SQL
-import Starter
-import settings as s
-from collections import defaultdict, deque
-from core.commands_map import command_definitions
-
-try:
-    import pkg_resources
-except ImportError:
-    logging.info("setuptools not found. Installing setuptools...")
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'setuptools'])
-    import pkg_resources
-
-required = {'twisted', 'pyopenssl', 'service_identity', 'psutil', 'scapy', 'bcrypt', 'watchdog'}
-installed = {pkg.key for pkg in pkg_resources.working_set}
-missing = required - installed
-
-if missing:
-    python = sys.executable
-    try:
-        subprocess.check_call([python, '-m', 'pip', 'install', *missing],
-                              stdout=subprocess.DEVNULL)
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Failed to install required packages: {e}")
-        sys.exit(1)
-
-from twisted.internet import protocol, ssl, reactor
-from twisted.words.protocols import irc
-from scapy.all import conf
-import socket
-
 L3RawSocket = conf.L3socket
-
 servers_order = 0
 channelStatusChars = "~@+%"
 current_instance = None
-
 
 # ───────────────────────────────────────────────
 # Thread Worker with stop support

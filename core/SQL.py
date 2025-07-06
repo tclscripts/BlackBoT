@@ -5,7 +5,6 @@ import Variables as v
 import re
 import datetime
 
-
 ##
 # check method for connection availability
 class SQL:
