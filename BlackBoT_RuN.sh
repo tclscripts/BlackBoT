@@ -5,10 +5,15 @@
 # Exit on error
 set -e
 
-# Check for python3-venv
-if ! dpkg -s python3-venv >/dev/null 2>&1; then
-    echo "📦 Installing python3-venv..."
-    sudo apt update && sudo apt install -y python3-venv
+if ! python3 -c "import venv" 2>/dev/null; then
+    echo "❌ The 'venv' module is not available in your Python installation."
+    echo "📦 Attempting to install python3-venv..."
+    if sudo apt install -y python3-venv; then
+        echo "✅ python3-venv installed successfully. Continuing..."
+    else
+        echo "❌ Failed to install python3-venv."
+        exit 1
+    fi
 fi
 
 echo "🔍 Checking Python virtual environment..."

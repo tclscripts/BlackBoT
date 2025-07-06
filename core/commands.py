@@ -213,6 +213,11 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
         key = (nick, host)
         self.user_cache[key] = userId
         self.send_message(feedback, f"✅ Welcome, {username}. You are now logged in from {host}.")
+        if not self.thread_check_logged_users_started:
+            self.thread_check_logged_users = self.ThreadWorker(target=self._check_logged_users_loop, name="logged_users")
+            self.thread_check_logged_users.daemon = True
+            self.thread_check_logged_users.start()
+            self.thread_check_logged_users_started = True
         success = True
     else:
         self.send_message(feedback, "❌ Incorrect username or password.")
