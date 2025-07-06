@@ -93,7 +93,7 @@ private_flood_time = 2           # Ignore duration in minutes
 # Message Queue (Flood Avoidance)
 # ───────────────────────────────────────────────
 
-message_delay = 1                # Delay in seconds between bot messages
+message_delay = 1.5                # Delay in seconds between bot messages
 
 
 # ───────────────────────────────────────────────
