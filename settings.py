@@ -47,7 +47,7 @@ ssl_key_file = ""                # Path to client private key file (e.g., "certs
 # NickServ Login Settings
 # ───────────────────────────────────────────────
 
-nickserv_login_enabled = True             # Enable/disable NickServ login
+nickserv_login_enabled = False             # Enable/disable NickServ login
 require_nickserv_ident = True              # ✅ Only join channels if identified to NickServ
 nickserv_nick = "NickServ"                # Name of the service (usually "NickServ")
 nickserv_botnick = "BlackBoT"        # Bot's nickname for NickServ identification
