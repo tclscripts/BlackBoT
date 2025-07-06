@@ -696,25 +696,26 @@ class Bot(irc.IRCClient):
                 return user[4] if isinstance(user[4], str) else ""
         return ""
 
-    def privmsg(self, user, channel, msg):
-        nick = user.split("!")[0]
+    def noticed(self, user, channel, message):
+        nick = user.split("!")[0] if user else ""
         if nick.lower() == s.nickserv_nick.lower() and getattr(self, "nickserv_waiting", True):
-            if any(keyword in msg.lower() for keyword in
+            if any(keyword in message.lower() for keyword in
                    ["you are now identified", "has been successfully identified"]):
-                print("✅ NickServ identification successful.")
+                print("✅ NickServ identification successful (via NOTICE).")
                 self.nickserv_waiting = False
                 self._join_channels()
-                return
-            elif any(keyword in msg.lower() for keyword in
-                     ["password incorrect", "authentication failed", "isn't registered"]):
-                print("❌ NickServ identification failed.")
+            elif any(keyword in message.lower() for keyword in
+                     ["password incorrect", "authentication failed", "is not a registered"]):
+                print("❌ NickServ identification failed (via NOTICE).")
                 self.nickserv_waiting = False
-                print("➡️ Falling back to settings.channels only.")
+                print("➡️ Falling back to main channel only.")
                 for chan in s.channels:
                     self.join(chan)
                     self.channels.append(chan)
                     self.send_message(chan, "❌ NickServ identification failed. Limited channel access.")
-                return
+
+    def privmsg(self, user, channel, msg):
+        nick = user.split("!")[0]
         host = user.split("!")[1]
         args = msg.split()
         command = ""
