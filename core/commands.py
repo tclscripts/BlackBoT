@@ -10,6 +10,7 @@ import bcrypt
 import os
 import psutil
 from datetime import datetime
+from core.threading_utils import ThreadWorker
 
 
 def cmd_status(self, channel, feedback, nick, host, msg):
@@ -214,7 +215,7 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
         self.user_cache[key] = userId
         self.send_message(feedback, f"✅ Welcome, {username}. You are now logged in from {host}.")
         if not self.thread_check_logged_users_started:
-            self.thread_check_logged_users = self.ThreadWorker(target=self._check_logged_users_loop, name="logged_users")
+            self.thread_check_logged_users = ThreadWorker(target=self._check_logged_users_loop, name="logged_users")
             self.thread_check_logged_users.daemon = True
             self.thread_check_logged_users.start()
             self.thread_check_logged_users_started = True

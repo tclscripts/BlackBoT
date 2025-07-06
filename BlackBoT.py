@@ -21,6 +21,7 @@ from core import commands
 from core import Variables as v
 from core import SQL
 from core.commands_map import command_definitions
+from core.threading_utils import ThreadWorker
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 
@@ -29,34 +30,6 @@ L3RawSocket = conf.L3socket
 servers_order = 0
 channelStatusChars = "~@+%"
 current_instance = None
-
-# ───────────────────────────────────────────────
-# Thread Worker with stop support
-# ───────────────────────────────────────────────
-
-thread_stop_events = {}
-
-
-class ThreadWorker(threading.Thread):
-    def __init__(self, target, name):
-        super().__init__(target=target, name=name)
-        self.name = name
-        self.daemon = True
-        thread_stop_events[name] = threading.Event()
-
-    def stop(self):
-        thread_stop_events[self.name].set()
-
-    def reset(self):
-        thread_stop_events[self.name].clear()
-
-    def should_stop(self):
-        return thread_stop_events[self.name].is_set()
-
-
-def stop_all_threads(self):
-    for name, event in thread_stop_events.items():
-        event.set()
 
 # Singleton SQL instance
 class SQLManager:
