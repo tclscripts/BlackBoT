@@ -76,6 +76,7 @@ class ThreadWorker(threading.Thread):
     def should_stop(self):
         return thread_stop_events[self.name].is_set()
 
+
 def stop_all_threads(self):
     for name, event in thread_stop_events.items():
         event.set()
@@ -301,10 +302,13 @@ class Bot(irc.IRCClient):
 
     def _message_worker(self):
         while True:
-            channel, message = self.message_queue.get()
-            if channel and message:
-                self.msg(channel, message)
-            time.sleep(self.message_delay)
+            try:
+                channel, message = self.message_queue.get(timeout=1)
+                if channel and message:
+                    self.msg(channel, message)
+                time.sleep(self.message_delay)
+            except queue.Empty:
+                continue
 
     def check_private_flood_prot(self, host):
         sql = SQL.SQL(self.sqlite3_database)

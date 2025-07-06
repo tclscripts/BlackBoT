@@ -95,6 +95,7 @@ private_flood_time = 2           # Ignore duration in minutes
 
 message_delay = 1                # Delay in seconds between bot messages
 
+
 # ───────────────────────────────────────────────
 # Long Message Splitting
 # ───────────────────────────────────────────────
