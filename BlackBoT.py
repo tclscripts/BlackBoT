@@ -107,6 +107,7 @@ class Bot(irc.IRCClient):
         self.username = s.username
         self.newbot = 0
         self.botId = 0
+        self.nickserv_waiting = False
         self.ignore_cleanup_started = False
         self.nick_already_in_use = 0
         self.channels = []
@@ -181,22 +182,10 @@ class Bot(irc.IRCClient):
         self.sendLine("AWAY :" + s.away)
         if s.nickserv_login_enabled:
             self.login_nickserv()
-        if self.newbot[0] == 0:  # new bot
-            print(f"{self.nickname} is a new bot, joining it's default channels and saving them.")
-            for channel in s.channels:
-                self.join(channel)  # join channel
-                self.channels.append(channel)
-                sql_instance.sqlite3_addchan(channel, self.username, self.botId)  # add channel to database
-        else:  # not new, just join stored channels
-            stored_channels = sql_instance.sqlite3_channels(self.botId)
-            for channel in stored_channels:
-                # check if suspended
-                if not sql_instance.sqlite_is_channel_suspended(channel[0]):
-                    self.join(channel[0])  # join stored channels.
-                    self.channels.append(channel[0])
-                    print(f"Joining {channel[0]} ..")
-                else:
-                    self.notOnChannels.append(channel[0])
+            if s.require_nickserv_ident:
+                print("⏳ Waiting for NickServ identification before joining channels.")
+                return
+        self._join_channels()
 
     def lineReceived(self, line):
         try:
@@ -272,6 +261,23 @@ class Bot(irc.IRCClient):
             'reason': reason
         }
 
+    def _join_channels(self):
+        sql_instance = SQLManager.get_instance()
+        if self.newbot[0] == 0:
+            for channel in s.channels:
+                self.join(channel)
+                self.channels.append(channel)
+                sql_instance.sqlite3_addchan(channel, self.username, self.botId)
+        else:
+            stored_channels = sql_instance.sqlite3_channels(self.botId)
+            for channel in stored_channels:
+                if not sql_instance.sqlite_is_channel_suspended(channel[0]):
+                    self.join(channel[0])
+                    self.channels.append(channel[0])
+                    print(f"Joining {channel[0]} ..")
+                else:
+                    self.notOnChannels.append(channel[0])
+
     def cleanup_ignores(self):
         sql = SQL.SQL(self.sqlite3_database)
         while not thread_stop_events["ignore_cleanup"].is_set():
@@ -288,6 +294,7 @@ class Bot(irc.IRCClient):
         try:
             self.sendLine(f"PRIVMSG {s.nickserv_nick} :IDENTIFY {s.nickserv_botnick} {s.nickserv_password}")
             print(f"🔐 Sent IDENTIFY to {s.nickserv_nick}")
+            self.nickserv_waiting = True
         except Exception as e:
             print(f"❌ Failed to IDENTIFY to {s.nickserv_nick}: {e}")
 
@@ -691,6 +698,23 @@ class Bot(irc.IRCClient):
 
     def privmsg(self, user, channel, msg):
         nick = user.split("!")[0]
+        if nick.lower() == s.nickserv_nick.lower() and getattr(self, "nickserv_waiting", True):
+            if any(keyword in msg.lower() for keyword in
+                   ["you are now identified", "has been successfully identified"]):
+                print("✅ NickServ identification successful.")
+                self.nickserv_waiting = False
+                self._join_channels()
+                return
+            elif any(keyword in msg.lower() for keyword in
+                     ["password incorrect", "authentication failed", "isn't registered"]):
+                print("❌ NickServ identification failed.")
+                self.nickserv_waiting = False
+                print("➡️ Falling back to settings.channels only.")
+                for chan in s.channels:
+                    self.join(chan)
+                    self.channels.append(chan)
+                    self.send_message(chan, "❌ NickServ identification failed. Limited channel access.")
+                return
         host = user.split("!")[1]
         args = msg.split()
         command = ""
