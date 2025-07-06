@@ -285,7 +285,7 @@ class Bot(irc.IRCClient):
         if not s.nickserv_login_enabled or not s.nickserv_password:
             return
         try:
-            self.sendLine(f"PRIVMSG {s.nickserv_nick} :IDENTIFY {s.nickserv_password}")
+            self.sendLine(f"PRIVMSG {s.nickserv_nick} :IDENTIFY {s.nickserv_botnick} {s.nickserv_password}")
             print(f"🔐 Sent IDENTIFY to {s.nickserv_nick}")
         except Exception as e:
             print(f"❌ Failed to IDENTIFY to {s.nickserv_nick}: {e}")
@@ -305,7 +305,6 @@ class Bot(irc.IRCClient):
             if channel and message:
                 self.msg(channel, message)
             time.sleep(self.message_delay)
-
 
     def check_private_flood_prot(self, host):
         sql = SQL.SQL(self.sqlite3_database)
