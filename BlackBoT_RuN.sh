@@ -55,4 +55,4 @@ done
 
 # 4. Start the bot
 echo "🚀 Starting BlackBoT..."
-$PYTHON_EXEC Starter.py
+$PYTHON_EXEC Starter.py > logs/bot_output.log 2>&1 &
