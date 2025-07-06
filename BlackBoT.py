@@ -12,16 +12,18 @@ import Starter
 import settings as s
 import socket
 from collections import defaultdict, deque
-from core.commands_map import command_definitions
 from twisted.internet import protocol, ssl, reactor
 from twisted.words.protocols import irc
 from scapy.all import conf
+
+sys.path.append(os.path.join(os.path.dirname(__file__), 'core'))
 from core import commands
 from core import Variables as v
 from core import SQL
+from core.commands_map import command_definitions
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
-sys.path.append(os.path.join(os.path.dirname(__file__), 'core'))
+
 
 L3RawSocket = conf.L3socket
 servers_order = 0

@@ -11,7 +11,6 @@ if ! dpkg -s python3-venv >/dev/null 2>&1; then
     sudo apt update && sudo apt install -y python3-venv
 fi
 
-
 echo "🔍 Checking Python virtual environment..."
 
 # Path to your virtual environment
