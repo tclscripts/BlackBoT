@@ -54,7 +54,6 @@
 # added some imports into functions to have some memory benefits
 # solved issue related to reload imports uppon rehash
 # implemented autoupdate timer
+# added option to not enter to channels, only on main, if not identifed to nickserv
 ----------------------------------------------------------------------------------
-
 - to solve issues related to update
-- option to not enter to channels, only on main, if not identifed to nickserv
