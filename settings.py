@@ -8,7 +8,7 @@ char = "!"                        # Prefix for bot commands
 nickname = "BlackBoT"             # Bot's main nickname
 username = "Black"               # IRC ident (username) of the bot
 altnick = "BlackBoT_"            # Alternate nickname if the main one is taken
-realname = "BlackBoT: Python Edition"  # Realname shown in WHOIS
+realname = "BlackBoT"  # Realname shown in WHOIS
 away = "No Away"                 # Default away message
 
 # ───────────────────────────────────────────────
@@ -26,8 +26,10 @@ sourceIP = ""                     # Source IP ("" = auto)
 sourcePort = 3337                 # Outgoing port if sourceIP is used
 
 servers = [                       # List of IRC servers ("host port")
-    "irc.libera.chat 6667",
-    "irc.undernet.org 6667"
+    "195.234.61.39 6667",
+    "irc.chathispano.com 6667",
+    "irc.irc-hispano.org 6667",
+    "ssl.chathispano.com +6697"
 ]
 
 port = 6667                       # Default port if not specified per-server
