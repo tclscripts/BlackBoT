@@ -1,30 +1,36 @@
 import time
 import sqlite3
-from sqlite3 import Error
 import Variables as v
-import re
 import datetime
+import threading
 
-##
-# check method for connection availability
 class SQL:
-
     def __init__(self, sqlite3_database):
         self.database = sqlite3_database
+        self._lock = threading.RLock()
+        self._conn = self._create_persistent_connection()
+
+    def _create_persistent_connection(self):
+        conn = sqlite3.connect(
+            self.database,
+            check_same_thread=False,      # folosești threading în bot
+            isolation_level=None,         # autocommit controlat manual prin BEGIN/COMMIT când vrei
+            timeout=5.0,                  # evită "database is locked"
+            detect_types=0
+        )
+        # PRAGMA-uri
+        conn.execute("PRAGMA foreign_keys=ON;")
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA temp_store=MEMORY;")
+        conn.execute("PRAGMA cache_size=-2000;")   # ~2MB (ajustabil din settings)
+        conn.execute("PRAGMA busy_timeout=3000;")  # 3s
+        # (opțional, pe SSD și dacă e ok) conn.execute("PRAGMA mmap_size=268435456;")  # 256MB
+        return conn
 
     def create_connection(self):
-        try:
-            connection = sqlite3.connect(self.database)
-            # PRAGMA-uri ușoare:
-            connection.execute("PRAGMA journal_mode=WAL;")
-            connection.execute("PRAGMA synchronous=NORMAL;")
-            connection.execute("PRAGMA temp_store=MEMORY;")
-            # opțional (cache pe disc negativ -> mai puțină RAM):
-            connection.execute("PRAGMA cache_size=-2000;")  # ~2MB cache
-            return connection
-        except Error as e:
-            print("Error while connecting to SQL", e)
-            return None
+        # păstrezi compatibilitatea cu restul codului
+        return self._conn
 
     ##
     # execute method
@@ -36,7 +42,7 @@ class SQL:
             connection.commit()
         finally:
             cursor.close()
-            connection.close()
+            
         return out
 
     def sqlite3_update(self, sql, what):  # update sql
@@ -47,7 +53,7 @@ class SQL:
             connection.commit()
         finally:
             cursor.close()
-            connection.close()
+            
         return out
 
     ##
@@ -61,7 +67,6 @@ class SQL:
             connection.commit()
         finally:
             cursor.close()
-            connection.close()
         return last_row_id
 
     ##
@@ -77,7 +82,6 @@ class SQL:
             result = cursor.fetchall()
         finally:
             cursor.close()
-            connection.close()
         return result
 
     def sqlite_has_active_ignores(self, botId):
