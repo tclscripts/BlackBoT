@@ -15,6 +15,8 @@ from collections import defaultdict, deque
 from twisted.internet import protocol, ssl, reactor
 from twisted.words.protocols import irc
 from scapy.all import conf
+from collections import defaultdict, deque
+
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'core'))
 from core import commands
@@ -78,6 +80,7 @@ class Bot(irc.IRCClient):
         self.newbot = sql_instance.sqlite3_bot_birth(self.username, self.nickname, self.realname,
                                                      self.away)
         self.botId = self.newbot[1]
+        self.host_to_nicks = defaultdict(set)
 
         # ⏱️ Uptime update thread
         self.thread_update_uptime = ThreadWorker(
@@ -472,6 +475,16 @@ class Bot(irc.IRCClient):
             host = f"{wnickname}!{wident}@{whost}"
             lhost = self.get_hostname(wnickname, f"{wident}@{whost}", 0)
 
+            # 1) memorează nick-ul pe host (set => fără duplicate)
+            self.host_to_nicks[lhost].add(wnickname)
+
+            # 2) dacă există deja un user logat pe acest host, atașează imediat nick-ul
+            existing_uid = self.get_logged_in_user_by_host(lhost)
+            if existing_uid:
+                self.logged_in_users[existing_uid].setdefault("nicks", set()).add(wnickname)
+                print(
+                    f"🔐 Auto-login: host={lhost} userId={existing_uid} nicks=[{', '.join(sorted(self.logged_in_users[existing_uid]['nicks']))}] (trigger: {lhost})")
+
             privilege_chars = {'@', '+', '%', '&', '~'}
             privileges = ''.join(sorted(c for c in wstatus if c in privilege_chars))
 
@@ -490,29 +503,47 @@ class Bot(irc.IRCClient):
                     wchannel, wnickname, wident, whost, privileges, wrealname, userId
                 ])
                 self.known_users.add((wchannel, wnickname))
+
             if wnickname == s.nickname:
                 return
+
+            # 3) login clasic + atașează TOATE nick-urile văzute pe același host
             if userId and not self.is_logged_in(userId, lhost):
                 stored_hash = sql.sqlite_get_user_password(userId)
                 if not stored_hash:
                     return
                 autologin_setting = sql.sqlite_get_user_setting(self.botId, userId, 'autologin')
-
                 if autologin_setting is not None and autologin_setting == "0":
                     return
 
                 if userId not in self.logged_in_users:
-                    self.logged_in_users[userId] = {"hosts": [], "nick": wnickname}
+                    self.logged_in_users[userId] = {"hosts": [], "nick": wnickname, "nicks": set()}
+
                 if lhost not in self.logged_in_users[userId]["hosts"]:
                     self.logged_in_users[userId]["hosts"].append(lhost)
+
+                # atașează toate nick-urile de pe host (inclusiv actualul)
+                nicks_on_host = self.host_to_nicks.get(lhost, set()) or {wnickname}
+                self.logged_in_users[userId]["nicks"].update(nicks_on_host)
+
+                # păstrează ultimul nick văzut live
                 self.logged_in_users[userId]["nick"] = wnickname
-                print(f"🔐 Auto-login: {wnickname} (userId={userId}) from {host}")
+
+                print(
+                    f"🔐 Auto-login: host={lhost} userId={userId} nicks=[{', '.join(sorted(self.logged_in_users[userId]['nicks']))}] (trigger: {host})")
+
                 if not self.thread_check_logged_users_started:
                     print("🚀 Starting logged user monitor thread...")
-                    self.thread_check_logged_users = ThreadWorker(target=self._check_logged_users_loop, name="logged_users")
+                    self.thread_check_logged_users = ThreadWorker(target=self._check_logged_users_loop,
+                                                                  name="logged_users")
                     self.thread_check_logged_users.daemon = True
                     self.thread_check_logged_users.start()
                     self.thread_check_logged_users_started = True
+
+            else:
+                # 4) dacă e deja logat pe host-ul ăsta, doar adaugă nick-ul în set
+                if userId and self.is_logged_in(userId, lhost):
+                    self.logged_in_users[userId].setdefault("nicks", set()).add(wnickname)
 
     def irc_ERR_NICKNAMEINUSE(self, prefix, params):
         if self.nick_already_in_use == 1 and self.recover_nick_timer_start is False:
