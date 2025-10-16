@@ -3,17 +3,16 @@ import time
 from core import update
 import settings as s
 import Variables as v
-import gc
 import threading
-import platform
-import bcrypt
 import os
-import psutil
 from datetime import datetime
 from core.threading_utils import ThreadWorker
+from core.sql_manager import SQLManager
 
 
 def cmd_status(self, channel, feedback, nick, host, msg):
+    import psutil
+    import platform
     result = self.check_command_access(channel, nick, host, '30', feedback)
     if not result:
         return
@@ -44,16 +43,12 @@ def cmd_status(self, channel, feedback, nick, host, msg):
     pending_rejoins = len(self.rejoin_pending)
     channel_info = len(self.channel_details)
 
-    # GC total objects (optional)
-    total_objects = len(gc.get_objects())
-
     # Compose message
     msg_lines = [
         f"📊 *Advanced Status Report*",
         f"🔢 Threads: {num_threads} — {thread_names}",
         f"👥 Logged Users: {users_logged} | 🧠 Known: {known_users} | 🔐 Cache: {user_cache}",
         f"🔁 Rejoin Queue: {pending_rejoins} | 📺 Channel Details: {channel_info}",
-        f"📦 GC Objects: {total_objects}",
         f"🧠 RAM: {rss_mb:.2f}MB / {total_mem_mb:.0f}MB | 🔄 CPU: {cpu_percent:.1f}%",
         f"💻 System: {system} {release} | CPU: {cpu_model}",
         f"⏱️ Uptime: {formatted_uptime}",
@@ -67,7 +62,7 @@ def cmd_myset(self, channel, feedback, nick, host, msg):
     parts = msg.strip().split(None, 1)
 
     host_mask = self.get_hostname(nick, host, 0)
-    sql = SQL(self.sqlite3_database)
+    sql = SQLManager.get_instance()
 
     info = sql.sqlite_handle(self.botId, nick, host_mask)
     userId = info[0] if info else self.get_logged_in_user_by_host(host_mask)
@@ -142,13 +137,14 @@ def cmd_update(self, channel, feedback, nick, host, msg):
 
 
 def cmd_auth(self, channel, feedback, nick, host, msg):
+    import bcrypt
     parts = msg.strip().split()
     if not parts:
         self.send_message(feedback, "⚠️ Usage: auth <username> <password>")
         return
 
     host = self.get_hostname(nick, host, 0)
-    sql = SQL(self.sqlite3_database)
+    sql = SQLManager.get_instance()
 
     if parts[0].lower() == "save":
         userId = self.get_logged_in_user_by_host(host)
@@ -227,7 +223,8 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
 
 
 def cmd_newpass(self, channel, feedback, nick, host, msg):
-    sql = SQL(self.sqlite3_database)
+    import bcrypt
+    sql = SQLManager.get_instance()
     info = sql.sqlite_handle(self.botId, nick, host)
     if not info:
         return
@@ -254,7 +251,8 @@ def cmd_newpass(self, channel, feedback, nick, host, msg):
 
 
 def cmd_pass(self, channel, feedback, nick, host, msg):
-    sql = SQL(self.sqlite3_database)
+    import bcrypt
+    sql = SQLManager.get_instance()
     info = sql.sqlite_handle(self.botId, nick, host)
     if not info:
         return
@@ -281,6 +279,8 @@ def cmd_pass(self, channel, feedback, nick, host, msg):
 
 
 def cmd_uptime(self, channel, feedback, nick, host, msg):
+    import psutil
+    import platform
     result = self.check_command_access(channel, nick, host, '10', feedback)
     if not result:
         return
@@ -290,7 +290,7 @@ def cmd_uptime(self, channel, feedback, nick, host, msg):
     # Times
     bot_uptime = self.format_duration(now - process.create_time())
     system_uptime = self.format_duration(now - psutil.boot_time())
-    sql = SQL(self.sqlite3_database)
+    sql = SQLManager.get_instance()
     max_conn_time, max_uptime = sql.sqlite_get_bot_stats(self.botId)
 
     # RAM and CPU
@@ -787,7 +787,7 @@ def cmd_info(self, channel, feedback, nick, host, msg):
         self.send_message(feedback, "⚠️ Usage: info <#channel|user>")
         return
     arg = msg.strip()
-    sql = SQL(self.sqlite3_database)
+    sql = SQLManager.get_instance()
     lhost = self.get_hostname(nick, host, 0)
     result = self.check_command_access(channel, nick, host, '24', feedback)
     if not result:

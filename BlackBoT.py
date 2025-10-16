@@ -11,10 +11,8 @@ import Starter
 import core.threading_utils
 import settings as s
 import socket
-from collections import defaultdict, deque
 from twisted.internet import protocol, ssl, reactor
 from twisted.words.protocols import irc
-from scapy.all import conf
 from collections import defaultdict, deque
 
 
@@ -24,26 +22,13 @@ from core import Variables as v
 from core import SQL
 from core.commands_map import command_definitions
 from core.threading_utils import ThreadWorker
+from core.sql_manager import SQLManager
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 
-
-L3RawSocket = conf.L3socket
 servers_order = 0
 channelStatusChars = "~@+%"
 current_instance = None
-
-# Singleton SQL instance
-class SQLManager:
-    _instance = None
-
-    @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = SQL.SQL(s.sqlite3_database)
-            cls._instance.sqlite3_createTables()
-        return cls._instance
-
 
 class Bot(irc.IRCClient):
     def __init__(self, nickname, realname):
@@ -327,7 +312,6 @@ class Bot(irc.IRCClient):
 
     # check logged users to deauth
     def _check_logged_users_loop(self):
-        print("🧠 Logged users monitor thread started.")
         while True:
             if not self.logged_in_users:
                 print("✅ No more logged-in users. Monitor thread exiting.")

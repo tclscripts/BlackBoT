@@ -12,9 +12,15 @@ class SQL:
     def __init__(self, sqlite3_database):
         self.database = sqlite3_database
 
-    def create_connection(self):  # create connection
+    def create_connection(self):
         try:
             connection = sqlite3.connect(self.database)
+            # PRAGMA-uri ușoare:
+            connection.execute("PRAGMA journal_mode=WAL;")
+            connection.execute("PRAGMA synchronous=NORMAL;")
+            connection.execute("PRAGMA temp_store=MEMORY;")
+            # opțional (cache pe disc negativ -> mai puțină RAM):
+            connection.execute("PRAGMA cache_size=-2000;")  # ~2MB cache
             return connection
         except Error as e:
             print("Error while connecting to SQL", e)
@@ -408,21 +414,19 @@ class SQL:
         return re.match(regex_pattern, string, re.IGNORECASE)
 
     def sqlite_handle(self, botId, nickname, nick_host):
-        query = "SELECT id, username FROM USERS WHERE botId = ?"
-        results = self.sqlite_select(query, (botId,))
+        full = f"{nickname}!{nick_host}"
 
-        if not results:
-            return None
-
-        for row in results:
-            user_id, username = row
-            query = "SELECT hostname FROM USERSHOSTNAMES WHERE botId = ? AND userId = ?"
-            host_results = self.sqlite_select(query, (botId, user_id))
-            for host_row in host_results:
-                host = host_row[0]
-                if self.string_match_nocase(host, f"{nickname}!{nick_host}"):
-                    return user_id, username
-        return None
+        query = """
+                SELECT u.id, u.username
+                FROM USERS u
+                         JOIN USERSHOSTNAMES h ON h.userId = u.id AND h.botId = u.botId
+                WHERE u.botId = ?
+                  AND ? LIKE REPLACE(REPLACE(h.hostname, '*', '%'), '?', '_')
+                    COLLATE NOCASE
+                    LIMIT 1 \
+                """
+        rows = self.sqlite_select(query, (botId, full))
+        return rows[0] if rows else None
 
     # host for user exists
     def sqlite_check_user_host_exists(self, botId, userId, hostname):
@@ -789,4 +793,19 @@ class SQL:
         self.sqlite3_execute(global_access)
         self.sqlite3_execute(user_logins)
         self.sqlite3_execute(ignores)
+
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_users_bot ON USERS(botId)",
+            "CREATE INDEX IF NOT EXISTS idx_users_username ON USERS(botId, username COLLATE NOCASE)",
+            "CREATE INDEX IF NOT EXISTS idx_hosts_user ON USERSHOSTNAMES(botId, userId)",
+            "CREATE INDEX IF NOT EXISTS idx_hosts_hostname ON USERSHOSTNAMES(botId, hostname COLLATE NOCASE)",
+            "CREATE INDEX IF NOT EXISTS idx_channels_name ON CHANNELS(botId, channelName COLLATE NOCASE)",
+            "CREATE INDEX IF NOT EXISTS idx_channelaccess_keys ON CHANNELACCESS(botId, channelId, userId)",
+            "CREATE INDEX IF NOT EXISTS idx_globalaccess_keys ON GLOBALACCESS(botId, userId)",
+            "CREATE INDEX IF NOT EXISTS idx_validaccess_flag ON VALIDACCESS(accessFlag)",
+            "CREATE INDEX IF NOT EXISTS idx_userlogins_user ON USERLOGINS(botId, userId, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_ignores_bot_host ON IGNORES(botId, host)"
+        ]
+        for q in indexes:
+            self.sqlite3_execute(q)
 ###

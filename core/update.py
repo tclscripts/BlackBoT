@@ -8,7 +8,6 @@ import os
 import shutil
 import zipfile
 import tempfile
-import requests
 import re
 
 GITHUB_REPO = "https://github.com/tclscripts/BlackBoT"
@@ -23,6 +22,7 @@ def read_local_version():
     return "0.0.0"
 
 def fetch_remote_version():
+    import requests
     url = f"{GITHUB_REPO}/raw/{BRANCH}/{VERSION_FILE}"
     r = requests.get(url)
     if r.status_code == 200:
@@ -74,6 +74,7 @@ def merge_settings(old_settings, new_settings_content):
 
 
 def update_from_github(self, feedback):
+    import requests
     local_version = read_local_version()
     remote_version = fetch_remote_version()
 
