@@ -60,16 +60,17 @@ class Bot(irc.IRCClient):
         self.user_cache = {}  # {(nick, host): userId}
         self.flood_tracker = defaultdict(lambda: deque())
         self.current_start_time = time.time()
-        sql_instance = SQLManager.get_instance()
         self.sqlite3_database = s.sqlite3_database
-        self.newbot = sql_instance.sqlite3_bot_birth(self.username, self.nickname, self.realname,
+        self.sql = SQLManager.get_instance()
+        self.newbot = self.sql.sqlite3_bot_birth(self.username, self.nickname, self.realname,
                                                      self.away)
         self.botId = self.newbot[1]
         self.host_to_nicks = defaultdict(set)
 
+
         # ⏱️ Uptime update thread
         self.thread_update_uptime = ThreadWorker(
-            target=lambda: sql_instance.sqlite_update_uptime(self, self.botId),
+            target=lambda: self.sql.sqlite_update_uptime(self, self.botId),
             name="uptime"
         )
         self.thread_update_uptime.start()
@@ -79,7 +80,7 @@ class Bot(irc.IRCClient):
         self.thread_known_users_cleanup.start()
 
         # 🚫 Ignore cleanup thread (doar dacă sunt active)
-        if sql_instance.sqlite_has_active_ignores(self.botId):
+        if self.sql.sqlite_has_active_ignores(self.botId):
             print("⏳ Active ignores found. Starting cleanup thread...")
             self.thread_ignore_cleanup = ThreadWorker(target=self.cleanup_ignores, name="ignore_cleanup")
             self.thread_ignore_cleanup.start()
@@ -96,7 +97,7 @@ class Bot(irc.IRCClient):
             self.thread_auto_update = ThreadWorker(target=self.auto_update_check_loop, name="auto_update")
             self.thread_auto_update.start()
 
-        if sql_instance.sqlite_isBossOwner(self.botId) > 0:
+        if self.sql.sqlite_isBossOwner(self.botId) > 0:
             self.unbind_hello = True
         else:
             self.unbind_hello = False
@@ -114,7 +115,6 @@ class Bot(irc.IRCClient):
             print("🔄 Resetting user caches.")
             self.known_users.clear()
             self.user_cache.clear()
-        sql_instance = SQLManager.get_instance()
         self.connected = True
         self.current_connect_time = time.time()
         self.sendLine("AWAY :" + s.away)
@@ -200,16 +200,15 @@ class Bot(irc.IRCClient):
         }
 
     def _join_channels(self):
-        sql_instance = SQLManager.get_instance()
         if self.newbot[0] == 0:
             for channel in s.channels:
                 self.join(channel)
                 self.channels.append(channel)
-                sql_instance.sqlite3_addchan(channel, self.username, self.botId)
+                self.sql.sqlite3_addchan(channel, self.username, self.botId)
         else:
-            stored_channels = sql_instance.sqlite3_channels(self.botId)
+            stored_channels = self.sql.sqlite3_channels(self.botId)
             for channel in stored_channels:
-                if not sql_instance.sqlite_is_channel_suspended(channel[0]):
+                if not self.sql.sqlite_is_channel_suspended(channel[0]):
                     self.join(channel[0])
                     self.channels.append(channel[0])
                     print(f"Joining {channel[0]} ..")
@@ -217,10 +216,9 @@ class Bot(irc.IRCClient):
                     self.notOnChannels.append(channel[0])
 
     def cleanup_ignores(self):
-        sql = SQL.SQL(self.sqlite3_database)
         while not core.threading_utils.thread_stop_events["ignore_cleanup"].is_set():
-            sql.sqlite_cleanup_ignores()
-            if not sql.sqlite_has_active_ignores(self.botId):
+            self.sql.sqlite_cleanup_ignores()
+            if not self.sql.sqlite_has_active_ignores(self.botId):
                 print("🛑 No more active ignores. Cleanup thread exiting.")
                 self.ignore_cleanup_started = False
                 break
@@ -238,8 +236,7 @@ class Bot(irc.IRCClient):
 
     def start_ignore_cleanup_if_needed(self):
         if not self.ignore_cleanup_started:
-            sql_instance = SQLManager.get_instance()
-            if sql_instance.sqlite_has_active_ignores(self.botId):
+            if self.sql.sqlite_has_active_ignores(self.botId):
                 print("⏳ Active ignores found. Starting cleanup thread...")
                 self.thread_ignore_cleanup = ThreadWorker(target=self.cleanup_ignores, name="ignore_cleanup")
                 self.thread_ignore_cleanup.start()
@@ -256,8 +253,7 @@ class Bot(irc.IRCClient):
                 continue
 
     def check_private_flood_prot(self, host):
-        sql = SQL.SQL(self.sqlite3_database)
-        if sql.sqlite_is_ignored(self.botId, host):
+        if self.sql.sqlite_is_ignored(self.botId, host):
             return True
 
         limit, interval = map(int, s.private_flood_limit.split(":"))
@@ -270,15 +266,14 @@ class Bot(irc.IRCClient):
         if len(self.flood_tracker[host]) > limit:
             print(f"⚠️ Flood detected from {host}, blacklisting...")
             reason = f"Flooding bot (>{limit}/{interval}s)"
-            sql.sqlite_add_ignore(self, self.botId, host, s.private_flood_time * 60, reason)
+            self.sql.sqlite_add_ignore(self, self.botId, host, s.private_flood_time * 60, reason)
             return True
 
         return False
 
     def check_command_access(self, channel, nick, host, flag_id, feedback=None):
-        sql = SQL.SQL(self.sqlite3_database)
         lhost = self.get_hostname(nick, host, 0)
-        info = sql.sqlite_handle(self.botId, nick, host)
+        info = self.sql.sqlite_handle(self.botId, nick, host)
 
         if info:
             userId = info[0]
@@ -296,7 +291,7 @@ class Bot(irc.IRCClient):
         flags_needed = self.get_flags(flag_id)
         if not self.check_access(channel, userId, flags_needed):
             return None
-        stored_hash = sql.sqlite_get_user_password(userId)
+        stored_hash = self.sql.sqlite_get_user_password(userId)
         if not stored_hash:
             self.send_message(nick,
                               "🔐 You currently have access but no password set. Please use `pass <password>` in private to secure your account. After that use `auth <password> to authenticate.`")
@@ -304,7 +299,7 @@ class Bot(irc.IRCClient):
             return None
 
         return {
-            "sql": sql,
+            "sql": self.sql,
             "userId": userId,
             "handle": handle,
             "lhost": lhost
@@ -324,8 +319,6 @@ class Bot(irc.IRCClient):
             time.sleep(3600 * s.autoDeauthTime)
 
     def clean_logged_users(self, silent=False):
-        if not silent:
-            print("🧹 Checking for disconnected logged users...")
         to_remove = []
         for userId, data in self.logged_in_users.items():
             hosts = data["hosts"]
@@ -466,19 +459,15 @@ class Bot(irc.IRCClient):
             existing_uid = self.get_logged_in_user_by_host(lhost)
             if existing_uid:
                 self.logged_in_users[existing_uid].setdefault("nicks", set()).add(wnickname)
-                print(
-                    f"🔐 Auto-login: host={lhost} userId={existing_uid} nicks=[{', '.join(sorted(self.logged_in_users[existing_uid]['nicks']))}] (trigger: {lhost})")
 
             privilege_chars = {'@', '+', '%', '&', '~'}
             privileges = ''.join(sorted(c for c in wstatus if c in privilege_chars))
 
             key = (wnickname, whost)
             if key in self.user_cache:
-                sql = SQL.SQL(self.sqlite3_database)
                 userId = self.user_cache[key]
             else:
-                sql = SQL.SQL(self.sqlite3_database)
-                info = sql.sqlite_handle(self.botId, wnickname, host)
+                info = self.sql.sqlite_handle(self.botId, wnickname, host)
                 userId = info[0] if info else None
                 self.user_cache[key] = userId
 
@@ -493,10 +482,10 @@ class Bot(irc.IRCClient):
 
             # 3) login clasic + atașează TOATE nick-urile văzute pe același host
             if userId and not self.is_logged_in(userId, lhost):
-                stored_hash = sql.sqlite_get_user_password(userId)
+                stored_hash = self.sql.sqlite_get_user_password(userId)
                 if not stored_hash:
                     return
-                autologin_setting = sql.sqlite_get_user_setting(self.botId, userId, 'autologin')
+                autologin_setting = self.sql.sqlite_get_user_setting(self.botId, userId, 'autologin')
                 if autologin_setting is not None and autologin_setting == "0":
                     return
 
@@ -513,11 +502,7 @@ class Bot(irc.IRCClient):
                 # păstrează ultimul nick văzut live
                 self.logged_in_users[userId]["nick"] = wnickname
 
-                print(
-                    f"🔐 Auto-login: host={lhost} userId={userId} nicks=[{', '.join(sorted(self.logged_in_users[userId]['nicks']))}] (trigger: {host})")
-
                 if not self.thread_check_logged_users_started:
-                    print("🚀 Starting logged user monitor thread...")
                     self.thread_check_logged_users = ThreadWorker(target=self._check_logged_users_loop,
                                                                   name="logged_users")
                     self.thread_check_logged_users.daemon = True
@@ -564,11 +549,10 @@ class Bot(irc.IRCClient):
         entry['attempts'] += 1
 
         if entry['attempts'] > s.maxAttemptRejoin:
-            sql_instance = SQLManager.get_instance()
             print(f"❌ Failed to rejoin {channel} after {s.maxAttemptRejoin} attempts. Suspending the channel.")
             entry = self.rejoin_pending.get(channel, {})
             reason = entry.get('reason', 'unknown')
-            sql_instance.sqlite_auto_suspend_channel(channel, reason)
+            self.sql.sqlite_auto_suspend_channel(channel, reason)
             self.notOnChannels.append(channel)
             del self.rejoin_pending[channel]
             return
@@ -841,11 +825,6 @@ class Bot(irc.IRCClient):
         line = filtered_dicts[0]
         return line.get('flags')
 
-    # eggdrop string match
-    def string_match_nocase(self, pattern, string):
-        regex_pattern = '^' + re.escape(pattern).replace(r'\*', '.*').replace(r'\?', '.') + '$'
-        return re.match(regex_pattern, string, re.IGNORECASE)
-
     def valid_command(self, command):
         found = False
         for line in self.commands:
@@ -950,9 +929,8 @@ class Bot(irc.IRCClient):
 
             self.load_commands()
 
-            import core.SQL as SQL
-            sql_instance = SQLManager.get_instance()
-            sql_instance.selfbot = self
+
+            self.sql.selfbot = self
 
             collected = gc.collect()
 

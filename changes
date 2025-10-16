@@ -58,3 +58,4 @@
 # solved issues regarding auto login for more than 1 user with the same host
 ----------------------------------------------------------------------------------
 - to solve issues related to update
+- to check if users are removed from memory if they quit or part

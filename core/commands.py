@@ -62,9 +62,8 @@ def cmd_myset(self, channel, feedback, nick, host, msg):
     parts = msg.strip().split(None, 1)
 
     host_mask = self.get_hostname(nick, host, 0)
-    sql = SQLManager.get_instance()
 
-    info = sql.sqlite_handle(self.botId, nick, host_mask)
+    info = self.sql.sqlite_handle(self.botId, nick, host_mask)
     userId = info[0] if info else self.get_logged_in_user_by_host(host_mask)
 
     if not userId or not self.is_logged_in(userId, host_mask):
@@ -87,7 +86,7 @@ def cmd_myset(self, channel, feedback, nick, host, msg):
             return
         value = "1" if value == "on" else "0"
 
-    sql.sqlite_update_user_setting(self.botId, userId, setting, value)
+    self.sql.sqlite_update_user_setting(self.botId, userId, setting, value)
     self.send_message(feedback, f"✅ Setting `{setting}` updated to: {value}")
 
 
@@ -144,17 +143,16 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
         return
 
     host = self.get_hostname(nick, host, 0)
-    sql = SQLManager.get_instance()
 
     if parts[0].lower() == "save":
         userId = self.get_logged_in_user_by_host(host)
         if not userId:
             self.send_message(feedback, "❌ You are not logged in from this host.")
             return
-        if sql.sqlite_check_user_host_exists(self.botId, userId, host):
+        if self.sql.sqlite_check_user_host_exists(self.botId, userId, host):
             self.send_message(feedback, "ℹ️ This host is already saved as one of your trusted logins.")
         else:
-            sql.sqlite_add_user_host(self.botId, userId, host)
+            self.sql.sqlite_add_user_host(self.botId, userId, host)
             self.send_message(feedback, f"✅ Your current host `{host}` has been saved.")
         return
 
@@ -164,13 +162,13 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
 
     if len(parts) == 1:
         password = parts[0]
-        info = sql.sqlite_handle(self.botId, nick, host)
+        info = self.sql.sqlite_handle(self.botId, nick, host)
         if not info:
             self.send_message(feedback, "❌ No user found for this host. Use full `auth <user> <pass>`.")
             return
         userId = info[0]
         username = info[1]
-        stored_hash = sql.sqlite_get_user_password(userId)
+        stored_hash = self.sql.sqlite_get_user_password(userId)
         if not stored_hash:
             self.send_message(nick,
                               "🔐 You are a valid user but with no password set. Please use `pass <password>` in private to secure your account. After that use `auth [username] <password> to authenticate.`")
@@ -178,11 +176,11 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
     elif len(parts) >= 2:
         username = parts[0]
         password = " ".join(parts[1:])
-        userId = sql.sqlite_get_user_id_by_name(self.botId, username)
+        userId = self.sql.sqlite_get_user_id_by_name(self.botId, username)
         if not userId:
             self.send_message(feedback, "❌ Invalid username or password.")
             return
-        stored_hash = sql.sqlite_get_user_password(userId)
+        stored_hash = self.sql.sqlite_get_user_password(userId)
         if not stored_hash:
             self.send_message(nick,
                               "🔐 You are a valid user but with no password set. Please use `pass <password>` in private to secure your account. After that use `auth <password> to authenticate.`")
@@ -199,7 +197,7 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
         self.send_message(feedback, "🔓 You are already logged in from this host.")
         return
 
-    stored_hash = sql.sqlite_get_user_password(userId)
+    stored_hash = self.sql.sqlite_get_user_password(userId)
     success = False
     if stored_hash and bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8")):
         if userId not in self.logged_in_users:
@@ -219,13 +217,13 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
     else:
         self.send_message(feedback, "❌ Incorrect username or password.")
 
-    sql.sqlite_log_login_attempt(self.botId, nick, host, userId, success)
+    self.sql.sqlite_log_login_attempt(self.botId, nick, host, userId, success)
 
 
 def cmd_newpass(self, channel, feedback, nick, host, msg):
     import bcrypt
-    sql = SQLManager.get_instance()
-    info = sql.sqlite_handle(self.botId, nick, host)
+
+    info = self.sql.sqlite_handle(self.botId, nick, host)
     if not info:
         return
     userId = info[0]
@@ -237,7 +235,7 @@ def cmd_newpass(self, channel, feedback, nick, host, msg):
         self.send_message(feedback, "⚠️ Usage: newpass <your new password>")
         return
 
-    current_pass = sql.sqlite_get_user_password(userId)
+    current_pass = self.sql.sqlite_get_user_password(userId)
 
     if not current_pass:
         self.send_message(feedback, "⚠️ You don't have a password yet. Use `pass <password>` to set one.")
@@ -245,15 +243,15 @@ def cmd_newpass(self, channel, feedback, nick, host, msg):
 
     new_password = msg.strip().encode("utf-8")
     hashed = bcrypt.hashpw(new_password, bcrypt.gensalt())
-    sql.sqlite_set_password(userId, hashed.decode("utf-8"))
+    self.sql.sqlite_set_password(userId, hashed.decode("utf-8"))
 
     self.send_message(feedback, "✅ Your password has been updated.")
 
 
 def cmd_pass(self, channel, feedback, nick, host, msg):
     import bcrypt
-    sql = SQLManager.get_instance()
-    info = sql.sqlite_handle(self.botId, nick, host)
+
+    info = self.sql.sqlite_handle(self.botId, nick, host)
     if not info:
         return
     userId = info[0]
@@ -265,7 +263,7 @@ def cmd_pass(self, channel, feedback, nick, host, msg):
         self.send_message(feedback, "⚠️ Usage: pass <your password>")
         return
 
-    current_pass = sql.sqlite_get_user_password(info[0])
+    current_pass = self.sql.sqlite_get_user_password(info[0])
 
     if current_pass:
         self.send_message(feedback, "❌ You already have a password set. Use `newpass <new>` to change it.")
@@ -273,7 +271,7 @@ def cmd_pass(self, channel, feedback, nick, host, msg):
 
     password = msg.strip().encode("utf-8")
     hashed = bcrypt.hashpw(password, bcrypt.gensalt())
-    sql.sqlite_set_password(userId, hashed.decode("utf-8"))
+    self.sql.sqlite_set_password(userId, hashed.decode("utf-8"))
 
     self.send_message(feedback, "✅ Password successfully set.")
 
@@ -290,8 +288,8 @@ def cmd_uptime(self, channel, feedback, nick, host, msg):
     # Times
     bot_uptime = self.format_duration(now - process.create_time())
     system_uptime = self.format_duration(now - psutil.boot_time())
-    sql = SQLManager.get_instance()
-    max_conn_time, max_uptime = sql.sqlite_get_bot_stats(self.botId)
+
+    max_conn_time, max_uptime = self.sql.sqlite_get_bot_stats(self.botId)
 
     # RAM and CPU
     mem_info = process.memory_info()
@@ -328,7 +326,7 @@ def cmd_channels(self, channel, feedback, nick, host, msg):
     if not result:
         return
     sql = result['sql']
-    channels = sql.sqlite3_channels(self.botId)
+    channels = self.sql.sqlite3_channels(self.botId)
 
     if not channels:
         self.send_message(feedback, "🔍 No registered channels.")
@@ -339,7 +337,7 @@ def cmd_channels(self, channel, feedback, nick, host, msg):
         chan = chan_row[0]
         flags = []
 
-        if sql.sqlite_is_channel_suspended(chan):
+        if self.sql.sqlite_is_channel_suspended(chan):
             flags.append("🔒suspended")
         elif chan not in self.channels:
             flags.append("❌offline")
@@ -408,7 +406,7 @@ def cmd_jump(self, channel, feedback, nick, host, msg):  # jump command
 
 def cmd_hello(self, channel, feedback, nick, host, msg):
     if not self.unbind_hello:
-        sql_instance = SQL(self.sqlite3_database)
+        sql_instance = SQL(self.sql.ite3_database)
         userId = sql_instance.sqlite_add_user(self.botId, nick, '')
         accessId = sql_instance.sqlite_get_access_id('N')
         hostname = self.get_hostname(nick, host, 0)
@@ -521,7 +519,7 @@ def cmd_add(self, channel, feedback, nick, host, msg):
 
     sql = result["sql"]
     userId = result["userId"]
-    issuer_flag = sql.sqlite_get_max_flag(self.botId, userId, channel)
+    issuer_flag = self.sql.sqlite_get_max_flag(self.botId, userId, channel)
 
     if not issuer_flag:
         self.send_message(feedback, "❌ Could not determine your access level.")
@@ -557,12 +555,12 @@ def cmd_add(self, channel, feedback, nick, host, msg):
         thost = user_info[3]
         thost_mask = self.get_hostname(tnick, f"{tident}@{thost}", 0)
 
-        db_info = sql.sqlite_handle(self.botId, tnick, f"{thost_mask}")
+        db_info = self.sql.sqlite_handle(self.botId, tnick, f"{thost_mask}")
         exists = db_info
-        target_userId = db_info[0] if db_info else sql.sqlite_create_user_with_host(self.botId, tnick, thost_mask)
+        target_userId = db_info[0] if db_info else self.sql.sqlite_create_user_with_host(self.botId, tnick, thost_mask)
 
-        target_flag_global = sql.sqlite_get_max_flag(self.botId, target_userId)
-        target_flag_local = sql.sqlite_get_max_flag(self.botId, target_userId, channel)
+        target_flag_global = self.sql.sqlite_get_max_flag(self.botId, target_userId)
+        target_flag_local = self.sql.sqlite_get_max_flag(self.botId, target_userId, channel)
         all_flags = [f for f in [target_flag_global, target_flag_local] if f]
 
         if all_flags:
@@ -576,23 +574,23 @@ def cmd_add(self, channel, feedback, nick, host, msg):
             except ValueError:
                 pass
 
-        access_id = sql.sqlite_get_access_id(flag)
+        access_id = self.sql.sqlite_get_access_id(flag)
 
         if flag in ['n', 'N']:
-            current_flag = sql.sqlite_get_max_flag(self.botId, target_userId)
+            current_flag = self.sql.sqlite_get_max_flag(self.botId, target_userId)
             if current_flag:
-                sql.sqlite_add_global_access(self.botId, target_userId, access_id, nick)
+                self.sql.sqlite_add_global_access(self.botId, target_userId, access_id, nick)
                 updated.append(f"{tnick} ({thost_mask})")
             else:
-                sql.sqlite_add_global_access(self.botId, target_userId, access_id, nick)
+                self.sql.sqlite_add_global_access(self.botId, target_userId, access_id, nick)
                 granted.append(f"{tnick} ({thost_mask})")
         else:
-            current_flag = sql.sqlite_get_max_flag(self.botId, target_userId, channel)
+            current_flag = self.sql.sqlite_get_max_flag(self.botId, target_userId, channel)
             if current_flag:
-                sql.sqlite_add_channel_access(self.botId, channel, target_userId, access_id, nick)
+                self.sql.sqlite_add_channel_access(self.botId, channel, target_userId, access_id, nick)
                 updated.append(f"{tnick} ({thost_mask})")
             else:
-                sql.sqlite_add_channel_access(self.botId, channel, target_userId, access_id, nick)
+                self.sql.sqlite_add_channel_access(self.botId, channel, target_userId, access_id, nick)
                 granted.append(f"{tnick} ({thost_mask})")
 
     if granted:
@@ -629,21 +627,21 @@ def cmd_userlist(self, channel, feedback, nick, host, msg):
             if len(args) > 1 and args[1].lower() == "global":
                 show_global = True
 
-    user_flag = sql.sqlite_get_max_flag(botId, userId)
+    user_flag = self.sql.sqlite_get_max_flag(botId, userId)
     is_global_admin = user_flag in ['N', 'n']
 
     if show_global:
         if not is_global_admin:
             self.send_message(feedback, "❌ Only users with global access can view global access list.")
             return
-        users = sql.sqlite_list_all_global_access(botId)
+        users = self.sql.sqlite_list_all_global_access(botId)
         label = "🌍 Global Access List"
     else:
         if target_channel != channel and not is_global_admin:
             self.send_message(feedback, f"❌ You are not allowed to view access for {target_channel}.")
             return
 
-        users = sql.sqlite_list_all_channel_access(botId, target_channel)
+        users = self.sql.sqlite_list_all_channel_access(botId, target_channel)
         label = f"📋 Access List for {target_channel}"
 
     if not users:
@@ -670,7 +668,7 @@ def cmd_delacc(self, channel, feedback, nick, host, msg):
 
     sql = result["sql"]
     userId = result["userId"]
-    issuer_flag = sql.sqlite_get_max_flag(self.botId, userId, channel)
+    issuer_flag = self.sql.sqlite_get_max_flag(self.botId, userId, channel)
 
     if not issuer_flag:
         self.send_message(feedback, "❌ Could not determine your access level.")
@@ -698,13 +696,13 @@ def cmd_delacc(self, channel, feedback, nick, host, msg):
         thost = user_info[3]
         thost_mask = self.get_hostname(tnick, f"{tident}@{thost}", 0)
 
-        db_info = sql.sqlite_handle(self.botId, tnick, thost_mask)
+        db_info = self.sql.sqlite_handle(self.botId, tnick, thost_mask)
         if not db_info:
             self.send_message(feedback, f"ℹ️ User '{tnick}' is not registered.")
             continue
 
         target_userId = db_info[0]
-        target_flag = sql.sqlite_get_max_flag(self.botId, target_userId, channel)
+        target_flag = self.sql.sqlite_get_max_flag(self.botId, target_userId, channel)
 
         if not target_flag:
             self.send_message(feedback, f"ℹ️ User '{tnick}' has no access.")
@@ -720,9 +718,9 @@ def cmd_delacc(self, channel, feedback, nick, host, msg):
             continue
 
         if target_flag in ['n', 'N']:
-            sql.sqlite_delete_global_access(self.botId, target_userId)
+            self.sql.sqlite_delete_global_access(self.botId, target_userId)
         else:
-            sql.sqlite_delete_channel_access(self.botId, target_userId, channel)
+            self.sql.sqlite_delete_channel_access(self.botId, target_userId, channel)
 
         removed.append(tnick)
 
@@ -744,7 +742,7 @@ def cmd_del(self, channel, feedback, nick, host, msg):
 
     sql = result["sql"]
     userId = result["userId"]
-    issuer_flag = sql.sqlite_get_max_flag(self.botId, userId, channel)
+    issuer_flag = self.sql.sqlite_get_max_flag(self.botId, userId, channel)
 
     if not issuer_flag:
         self.send_message(feedback, "❌ Could not determine your access level.")
@@ -758,14 +756,14 @@ def cmd_del(self, channel, feedback, nick, host, msg):
         return
 
     for username in args:
-        target_id = sql.sqlite_get_user_id_by_name(self.botId, username)
+        target_id = self.sql.sqlite_get_user_id_by_name(self.botId, username)
         if not target_id:
             self.send_message(feedback, f"ℹ️ User '{username}' not found.")
             continue
 
-        target_flag = sql.sqlite_get_max_flag(self.botId, target_id, channel)
+        target_flag = self.sql.sqlite_get_max_flag(self.botId, target_id, channel)
         if not target_flag:
-            target_flag = sql.sqlite_get_max_flag(self.botId, target_id)
+            target_flag = self.sql.sqlite_get_max_flag(self.botId, target_id)
 
         if target_flag:
             try:
@@ -777,7 +775,7 @@ def cmd_del(self, channel, feedback, nick, host, msg):
                                   f"⛔ You cannot delete user '{username}' (has same or higher level: {target_flag}).")
                 continue
 
-        sql.sqlite_delete_user(self.botId, target_id)
+        self.sql.sqlite_delete_user(self.botId, target_id)
         self.send_message(feedback, f"🗑️ User '{username}' and all their data have been deleted.")
 
 
@@ -787,7 +785,7 @@ def cmd_info(self, channel, feedback, nick, host, msg):
         self.send_message(feedback, "⚠️ Usage: info <#channel|user>")
         return
     arg = msg.strip()
-    sql = SQLManager.get_instance()
+
     lhost = self.get_hostname(nick, host, 0)
     result = self.check_command_access(channel, nick, host, '24', feedback)
     if not result:
@@ -795,13 +793,13 @@ def cmd_info(self, channel, feedback, nick, host, msg):
 
     requester_id = result["userId"]
     if not arg:
-        chan_info = sql.sqlite_get_channel_info(self.botId, channel)
+        chan_info = self.sql.sqlite_get_channel_info(self.botId, channel)
         if not chan_info:
             self.send_message(feedback, f"❌ Channel `{channel}` not found in database.")
             return
 
-        if not (sql.sqlite_user_has_channel_access(self.botId, requester_id, channel) or
-                sql.sqlite_user_has_global_access(self.botId, requester_id)):
+        if not (self.sql.sqlite_user_has_channel_access(self.botId, requester_id, channel) or
+                self.sql.sqlite_user_has_global_access(self.botId, requester_id)):
             self.send_message(feedback, "⛔ You do not have permission to view this channel's info.")
             return
 
@@ -821,25 +819,25 @@ def cmd_info(self, channel, feedback, nick, host, msg):
         tident = user_info[2]
         thost = user_info[3]
         thost_mask = self.get_hostname(tnick, f"{tident}@{thost}", 0)
-        db_info = sql.sqlite_handle(self.botId, tnick, thost_mask)
+        db_info = self.sql.sqlite_handle(self.botId, tnick, thost_mask)
         if not db_info:
             self.send_message(feedback, f"❌ No registered user found for {arg}.")
             return
         userId, username = db_info
     else:
-        userId = sql.sqlite_get_user_id_by_name(self.botId, arg)
+        userId = self.sql.sqlite_get_user_id_by_name(self.botId, arg)
         thost_mask = ""
         if not userId:
             self.send_message(feedback, f"❌ User `{arg}` not found in database.")
             return
         username = arg
 
-    added_time = sql.sqlite_get_user_added_time(self.botId, userId)
-    hosts = sql.sqlite_get_user_hosts(self.botId, userId)
-    logins = sql.sqlite_get_user_logins(self.botId, userId)
-    global_flag = sql.sqlite_get_max_flag(self.botId, userId)
-    local_flag = sql.sqlite_get_max_flag(self.botId, userId, channel)
-    user_settings = sql.sqlite_get_user_settings(self.botId, userId)
+    added_time = self.sql.sqlite_get_user_added_time(self.botId, userId)
+    hosts = self.sql.sqlite_get_user_hosts(self.botId, userId)
+    logins = self.sql.sqlite_get_user_logins(self.botId, userId)
+    global_flag = self.sql.sqlite_get_max_flag(self.botId, userId)
+    local_flag = self.sql.sqlite_get_max_flag(self.botId, userId, channel)
+    user_settings = self.sql.sqlite_get_user_settings(self.botId, userId)
 
     added_str = datetime.fromtimestamp(added_time).strftime('%Y-%m-%d %H:%M:%S') if added_time else "Unknown"
     login_status = "🟢 Logged in" if self.is_logged_in(userId, thost_mask) else "🔴 Not logged in"
@@ -851,7 +849,7 @@ def cmd_info(self, channel, feedback, nick, host, msg):
 
     settings_str = '\n'.join([f"➤ {k}: {v}" for k, v in user_settings.items()]) if user_settings else "None"
 
-    added_by, last_modified_by = sql.sqlite_get_user_audit(self.botId, userId)
+    added_by, last_modified_by = self.sql.sqlite_get_user_audit(self.botId, userId)
 
     self.send_message(feedback, f"👤 Info for user `{username}`:\n"
                                 f"➤ Added on: {added_str}\n"

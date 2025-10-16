@@ -409,10 +409,6 @@ class SQL:
 
         return bool(self.sqlite_select(query, tuple(params)))
 
-    def string_match_nocase(self, pattern, string):
-        regex_pattern = '^' + re.escape(pattern).replace(r'\*', '.*').replace(r'\?', '.') + '$'
-        return re.match(regex_pattern, string, re.IGNORECASE)
-
     def sqlite_handle(self, botId, nickname, nick_host):
         full = f"{nickname}!{nick_host}"
 
