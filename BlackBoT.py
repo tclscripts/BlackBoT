@@ -1,7 +1,6 @@
 import datetime
 import sys
 import time
-import threading
 import ipaddress
 import ssl
 import os
@@ -9,6 +8,7 @@ import re
 import queue
 import logging
 import Starter
+import core.threading_utils
 import settings as s
 import socket
 from collections import defaultdict, deque
@@ -230,7 +230,7 @@ class Bot(irc.IRCClient):
 
     def cleanup_ignores(self):
         sql = SQL.SQL(self.sqlite3_database)
-        while not thread_stop_events["ignore_cleanup"].is_set():
+        while not core.threading_utils.thread_stop_events["ignore_cleanup"].is_set():
             sql.sqlite_cleanup_ignores()
             if not sql.sqlite_has_active_ignores(self.botId):
                 print("🛑 No more active ignores. Cleanup thread exiting.")
@@ -787,7 +787,7 @@ class Bot(irc.IRCClient):
 
     # thread to recover main nick when available
     def recover_nickname(self):
-        while not thread_stop_events["recover_nick"].is_set():
+        while not core.threading_utils.thread_stop_events["recover_nick"].is_set():
             if self.nickname == s.nickname:
                 break
             if self.nick_already_in_use == 1:
@@ -898,7 +898,7 @@ class Bot(irc.IRCClient):
         return None
 
     def cleanup_known_users(self):
-        while not thread_stop_events["known_users"].is_set():
+        while not core.threading_utils.thread_stop_events["known_users"].is_set():
             time.sleep(1800)
             active_nick_channel_pairs = set((c[0], c[1]) for c in self.channel_details)
             before = len(self.known_users)
@@ -948,7 +948,7 @@ class Bot(irc.IRCClient):
     def auto_update_check_loop(self):
         import core.update as update
 
-        while not thread_stop_events["auto_update"].is_set():
+        while not core.threading_utils.thread_stop_events["auto_update"].is_set():
             try:
                 if not s.autoUpdateEnabled:
                     break
