@@ -9,6 +9,7 @@ import shutil
 import zipfile
 import tempfile
 import re
+from pathlib import Path
 
 GITHUB_REPO = "https://github.com/tclscripts/BlackBoT"
 BRANCH = "main"
@@ -16,15 +17,15 @@ VERSION_FILE = "VERSION"
 CONFIG_FILE = "settings.py"
 
 def read_local_version():
-    if os.path.exists(VERSION_FILE):
-        with open(VERSION_FILE, "r") as f:
+    if os.path.exists(Path(__file__).resolve().parent.parent / VERSION_FILE):
+        with open(Path(__file__).resolve().parent.parent / VERSION_FILE, "r") as f:
             return f.read().strip()
     return "0.0.0"
 
 def fetch_remote_version():
     import requests
     url = f"{GITHUB_REPO}/raw/{BRANCH}/{VERSION_FILE}"
-    r = requests.get(url)
+    r = requests.get(url, timeout=15)
     if r.status_code == 200:
         return r.text.strip()
     return None
@@ -38,7 +39,6 @@ def parse_settings(file_path):
                 var, value = match.groups()
                 settings[var] = value.strip()
     return settings
-
 
 def merge_settings(old_settings, new_settings_content):
     merged = []
@@ -71,10 +71,27 @@ def merge_settings(old_settings, new_settings_content):
 
     return "\n".join(merged)
 
+def _choose_extracted_root(tmpdir: Path) -> Path:
+    # Caută primul director rezultat din unzip (de obicei "BlackBoT-main")
+    for entry in tmpdir.iterdir():
+        if entry.is_dir():
+            return entry
+    raise RuntimeError("Zip extracted but no directory found.")
 
+def _project_root() -> Path:
+    # core/update.py -> core/ -> project root
+    return Path(__file__).resolve().parent.parent
+
+def _copy_file_atomic(src: Path, dst: Path):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    # Copiere într-un tmp și apoi replace atomic (unde OS permite)
+    tmp = dst.with_suffix(dst.suffix + ".updtmp")
+    shutil.copy2(src, tmp)
+    os.replace(tmp, dst)
 
 def update_from_github(self, feedback):
     import requests
+
     local_version = read_local_version()
     remote_version = fetch_remote_version()
 
@@ -87,49 +104,53 @@ def update_from_github(self, feedback):
     zip_url = f"{GITHUB_REPO}/archive/refs/heads/{BRANCH}.zip"
 
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            zip_path = os.path.join(tmpdir, "update.zip")
+        with tempfile.TemporaryDirectory() as tmpdir_str:
+            tmpdir = Path(tmpdir_str)
+            zip_path = tmpdir / "update.zip"
 
-            r = requests.get(zip_url)
-            if r.status_code != 200:
-                self.send_message(feedback, "❌ Failed to download update.")
-                return
-
+            r = requests.get(zip_url, timeout=60)
+            r.raise_for_status()
             with open(zip_path, "wb") as f:
                 f.write(r.content)
 
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(tmpdir)
 
-            extracted_dir = os.path.join(tmpdir, os.listdir(tmpdir)[0])
+            extracted_dir = _choose_extracted_root(tmpdir)
+            project_root = _project_root()
 
-            # Backup settings
-            if os.path.exists(CONFIG_FILE):
-                old_settings = parse_settings(CONFIG_FILE)
-            else:
-                old_settings = {}
+            self.send_message(feedback, f"📦 Extracted: {extracted_dir.name}")
+            self.send_message(feedback, f"📁 Project root: {project_root}")
 
+            # Backup & merge settings
+            local_settings = project_root / CONFIG_FILE
+            old_settings = parse_settings(local_settings) if local_settings.exists() else {}
+
+            # Copiază TOT (mai puțin settings.py) în proiect
             for root, _, files in os.walk(extracted_dir):
-                rel_path = os.path.relpath(root, extracted_dir)
-                dest_dir = os.path.join(os.getcwd(), rel_path)
-                os.makedirs(dest_dir, exist_ok=True)
+                root = Path(root)
+                rel_path = root.relative_to(extracted_dir)
+                dest_dir = project_root / rel_path
 
                 for file in files:
-                    src = os.path.join(root, file)
-                    dst = os.path.join(dest_dir, file)
+                    src = root / file
+                    dst = dest_dir / file
 
                     if file == CONFIG_FILE:
-                        with open(src, "r") as f:
+                        # Fuzionează setările în fișierul local
+                        with open(src, "r", encoding="utf-8") as f:
                             new_content = f.read()
                         merged = merge_settings(old_settings, new_content)
-                        with open(dst, "w") as f:
+                        with open(local_settings, "w", encoding="utf-8") as f:
                             f.write(merged)
                         self.send_message(feedback, f"🛠️ Merged settings preserved in {CONFIG_FILE}")
+                    elif file == "update.zip":
+                        continue
                     else:
-                        shutil.copy2(src, dst)
+                        _copy_file_atomic(src, dst)
 
-            # Save new version
-            with open(VERSION_FILE, "w") as f:
+            # Scrie versiunea nouă în rădăcina proiectului
+            with open(project_root / VERSION_FILE, "w", encoding="utf-8") as f:
                 f.write(remote_version)
 
             self.send_message(feedback, "✅ Update complete. Restarting...")
