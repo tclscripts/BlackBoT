@@ -14,6 +14,12 @@ class ThreadWorker(threading.Thread):
         self.daemon = True
         thread_stop_events[name] = threading.Event()
 
+    def run(self):
+        try:
+            super().run()
+        finally:
+            thread_stop_events.pop(self.name, None)
+
     def stop(self):
         thread_stop_events[self.name].set()
 

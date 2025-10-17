@@ -23,6 +23,42 @@ from core import SQL
 from core.commands_map import command_definitions
 from core.threading_utils import ThreadWorker
 from core.sql_manager import SQLManager
+from collections import OrderedDict
+import time
+
+class TTLCache(OrderedDict):
+    def __init__(self, maxlen=2000, ttl=6*3600):
+        super().__init__()
+        self.maxlen = maxlen
+        self.ttl = ttl
+
+    def set(self, key, value):
+        now = time.time()
+        super().__setitem__(key, (value, now))
+        self._trim(now)
+
+    def get_valid(self, key):
+        item = super().get(key)
+        if not item:
+            return None
+        value, ts = item
+        if time.time() - ts > self.ttl:
+            super().__delitem__(key)
+            return None
+        # LRU: mută la final
+        super().__delitem__(key)
+        super().__setitem__(key, (value, ts))
+        return value
+
+    def _trim(self, now=None):
+        now = now or time.time()
+        # expiră intrările vechi
+        for k, (v, ts) in list(self.items()):
+            if now - ts > self.ttl:
+                super().__delitem__(k)
+        # ține doar ultimele maxlen (LRU)
+        while len(self) > self.maxlen:
+            self.popitem(last=False)
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 
@@ -57,7 +93,7 @@ class Bot(irc.IRCClient):
         self.clean_logged_users(silent=True)
         self.thread_check_logged_users_started = False
         self.known_users = set()  # (channel, nick)
-        self.user_cache = {}  # {(nick, host): userId}
+        self.user_cache = TTLCache(maxlen=2000, ttl=6*3600)
         self.flood_tracker = defaultdict(lambda: deque())
         self.current_start_time = time.time()
         self.sqlite3_database = s.sqlite3_database
@@ -465,11 +501,11 @@ class Bot(irc.IRCClient):
 
             key = (wnickname, whost)
             if key in self.user_cache:
-                userId = self.user_cache[key]
+                userId = self.user_cache.get_valid(key)
             else:
                 info = self.sql.sqlite_handle(self.botId, wnickname, host)
                 userId = info[0] if info else None
-                self.user_cache[key] = userId
+                self.user_cache.set(key, userId)
 
             if (wchannel, wnickname) not in self.known_users:
                 self.channel_details.append([
