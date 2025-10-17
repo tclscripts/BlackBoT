@@ -8,13 +8,20 @@
 
 ## 📦 Features
 
-- Multi-server support with automatic failover
-- User authentication system with password hashing
-- Role-based permissions with per-channel and global flags
-- Channel management: op, voice, kick, join/leave
-- Auto-update from GitHub with setting preservation
-- SQLite database backend for persistent user and channel data
-- Modular command architecture
+- Multi-server support with automatic failover  
+- User authentication system with password hashing  
+- Role-based permissions with per-channel and global flags  
+- Channel management: op, voice, kick, join/leave  
+- Auto-update from GitHub with setting preservation  
+- SQLite database backend for persistent user and channel data  
+- Modular command architecture  
+- Threaded workers with stop/reset for background tasks  
+- Advanced status reporting (CPU, RAM, threads, uptime, system info)  
+- CTCP support (VERSION reply)  
+- Flexible hostmask formats for user management  
+- Caching with TTL and memory limits  
+- Extensible module system (e.g., YouTube fetcher)  
+- Cross-platform support (Linux/Windows) 
 
 ---
 
