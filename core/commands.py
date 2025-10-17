@@ -129,15 +129,7 @@ def cmd_update(self, channel, feedback, nick, host, msg):
             self.send_message(feedback, f"✅ Already up to date (version {local_version})")
 
     elif arg == "start":
-        local_version = update.read_local_version()
-        remote_version = update.fetch_remote_version()
-        if not remote_version:
-            self.send_message(feedback, "❌ Unable to fetch remote version.")
-            return
-        if remote_version <= local_version:
-            self.send_message(feedback, f"✅ Already up to date (version {local_version})")
-            return
-        self.send_message(feedback, "🔁 Starting update in background...")
+        self.send_message(feedback, "🔁 Starting update ..")
 
         def _run_update_threadsafe():
             # Marshal send_message calls back into the Twisted reactor thread
