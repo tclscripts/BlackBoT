@@ -22,7 +22,7 @@
 
 ```bash
 Clone the repository:
-```bash
+
 git clone https://github.com/tclscripts/BlackBoT.git
 cd BlackBoT
 
