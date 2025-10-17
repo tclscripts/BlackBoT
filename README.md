@@ -21,10 +21,29 @@
 ## 🚀 Getting Started
 
 ```bash
+Clone the repository:
+```bash
 git clone https://github.com/tclscripts/BlackBoT.git
 cd BlackBoT
+
+Edit the configuration file:
 nano settings.py
-python Starter.py
+
+Use the Bash script (Linux)
+  - The repo also includes a helper script BlackBoT_RuN.sh which:
+  - Creates a virtual environment
+  - Installs the required Python packages
+  - Starts the bot automatically
+
+Run it as:
+bash BlackBoT_RuN.sh
+
+Requirements
+Python 3.8+
+Linux or Windows (Linux recommended for BlackBoT_RuN.sh or directly Starter.py for Windows)
+Internet connection (for auto-update and external modules)
+
+Dependencies are listed in requirements.txt and will be installed automatically if you use the Bash script.
 ```
 
 ## 📂 File Structure
