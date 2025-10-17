@@ -7,8 +7,7 @@ import threading
 import os
 from datetime import datetime
 from core.threading_utils import ThreadWorker
-from core.sql_manager import SQLManager
-
+from twisted.internet import reactor
 
 def cmd_status(self, channel, feedback, nick, host, msg):
     import psutil
@@ -23,7 +22,7 @@ def cmd_status(self, channel, feedback, nick, host, msg):
     # Basic system info
     uptime = now - process.create_time()
     formatted_uptime = self.format_duration(uptime)
-    cpu_percent = process.cpu_percent(interval=0.5)
+    cpu_percent = process.cpu_percent(interval=None)
     mem_info = process.memory_info()
     rss_mb = mem_info.rss / (1024 * 1024)
     total_mem_mb = psutil.virtual_memory().total / (1024 * 1024)
@@ -128,15 +127,42 @@ def cmd_update(self, channel, feedback, nick, host, msg):
             self.send_message(feedback, f"🔄 Update available: {remote_version} (current: {local_version})")
         else:
             self.send_message(feedback, f"✅ Already up to date (version {local_version})")
+
     elif arg == "start":
-        self.send_message(feedback, "🔁 Starting update...")
-        update.update_from_github(self, feedback)
+        local_version = update.read_local_version()
+        remote_version = update.fetch_remote_version()
+        if not remote_version:
+            self.send_message(feedback, "❌ Unable to fetch remote version.")
+            return
+        if remote_version <= local_version:
+            self.send_message(feedback, f"✅ Already up to date (version {local_version})")
+            return
+        self.send_message(feedback, "🔁 Starting update in background...")
+
+        def _run_update_threadsafe():
+            # Marshal send_message calls back into the Twisted reactor thread
+            original_send = self.send_message
+            def safe_send(target, text):
+                reactor.callFromThread(original_send, target, text)
+            try:
+                self.send_message = safe_send
+                update.update_from_github(self, feedback)
+            finally:
+                self.send_message = original_send
+
+        self.thread_auto_update = ThreadWorker(target=_run_update_threadsafe, name="auto_update")
+        self.thread_auto_update.daemon = True
+        self.thread_auto_update.start()
+
     else:
         self.send_message(feedback, f"⚠️ Usage: {s.char}update check | {s.char}update start")
 
 
+
 def cmd_auth(self, channel, feedback, nick, host, msg):
     import bcrypt
+    from twisted.internet import reactor
+
     parts = msg.strip().split()
     if not parts:
         self.send_message(feedback, "⚠️ Usage: auth <username> <password>")
@@ -144,6 +170,7 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
 
     host = self.get_hostname(nick, host, 0)
 
+    # Save current host to trusted hosts
     if parts[0].lower() == "save":
         userId = self.get_logged_in_user_by_host(host)
         if not userId:
@@ -156,10 +183,12 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
             self.send_message(feedback, f"✅ Your current host `{host}` has been saved.")
         return
 
+    # Must auth in PM
     if feedback != nick:
         self.send_message(feedback, "❌ You must authenticate in private message.")
         return
 
+    # Resolve username/userId + stored_hash
     if len(parts) == 1:
         password = parts[0]
         info = self.sql.sqlite_handle(self.botId, nick, host)
@@ -170,8 +199,11 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
         username = info[1]
         stored_hash = self.sql.sqlite_get_user_password(userId)
         if not stored_hash:
-            self.send_message(nick,
-                              "🔐 You are a valid user but with no password set. Please use `pass <password>` in private to secure your account. After that use `auth [username] <password> to authenticate.`")
+            self.send_message(
+                nick,
+                "🔐 You are a valid user but with no password set. Please use `pass <password>` in private to secure your account. "
+                "After that use `auth [username] <password> to authenticate.`"
+            )
             return
     elif len(parts) >= 2:
         username = parts[0]
@@ -182,13 +214,17 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
             return
         stored_hash = self.sql.sqlite_get_user_password(userId)
         if not stored_hash:
-            self.send_message(nick,
-                              "🔐 You are a valid user but with no password set. Please use `pass <password>` in private to secure your account. After that use `auth <password> to authenticate.`")
+            self.send_message(
+                nick,
+                "🔐 You are a valid user but with no password set. Please use `pass <password>` in private to secure your account. "
+                "After that use `auth <password> to authenticate.`"
+            )
             return
     else:
         self.send_message(feedback, "⚠️ Usage: auth <username> <password>")
         return
 
+    # Policy checks
     if self.multiple_logins == 0:
         self.send_message(feedback, "⚠️ Multiple logins are not allowed.")
         return
@@ -197,27 +233,48 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
         self.send_message(feedback, "🔓 You are already logged in from this host.")
         return
 
-    stored_hash = self.sql.sqlite_get_user_password(userId)
-    success = False
-    if stored_hash and bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8")):
-        if userId not in self.logged_in_users:
-            self.logged_in_users[userId] = {"hosts": [], "nick": nick}
-        if host not in self.logged_in_users[userId]["hosts"]:
-            self.logged_in_users[userId]["hosts"].append(host)
-        self.logged_in_users[userId]["nick"] = nick
-        key = (nick, host)
-        self.user_cache[key] = userId
-        self.send_message(feedback, f"✅ Welcome, {username}. You are now logged in from {host}.")
-        if not self.thread_check_logged_users_started:
-            self.thread_check_logged_users = ThreadWorker(target=self._check_logged_users_loop, name="logged_users")
-            self.thread_check_logged_users.daemon = True
-            self.thread_check_logged_users.start()
-            self.thread_check_logged_users_started = True
-        success = True
-    else:
-        self.send_message(feedback, "❌ Incorrect username or password.")
+    # Offload bcrypt to a background thread to avoid blocking IRC reactor
+    def _do_auth_check():
+        success_local = False
+        try:
+            ok = stored_hash and bcrypt.checkpw(password.encode("utf-8"), stored_hash.encode("utf-8"))
+            if ok:
+                # Update in-memory login state
+                if userId not in self.logged_in_users:
+                    self.logged_in_users[userId] = {"hosts": [], "nick": nick}
+                if host not in self.logged_in_users[userId]["hosts"]:
+                    self.logged_in_users[userId]["hosts"].append(host)
+                self.logged_in_users[userId]["nick"] = nick
 
-    self.sql.sqlite_log_login_attempt(self.botId, nick, host, userId, success)
+                # Cache (TTLCache if available)
+                key = (nick, host)
+                if hasattr(self.user_cache, "set"):
+                    self.user_cache.set(key, userId)
+                else:
+                    self.user_cache[key] = userId
+
+                success_local = True
+                reactor.callFromThread(
+                    self.send_message,
+                    feedback,
+                    f"✅ Welcome, {username}. You are now logged in from {host}."
+                )
+
+                # Start logged_users monitor if not started
+                if not getattr(self, "thread_check_logged_users_started", False):
+                    self.thread_check_logged_users = ThreadWorker(
+                        target=self._check_logged_users_loop, name="logged_users"
+                    )
+                    self.thread_check_logged_users.daemon = True
+                    self.thread_check_logged_users.start()
+                    self.thread_check_logged_users_started = True
+            else:
+                reactor.callFromThread(self.send_message, feedback, "❌ Incorrect username or password.")
+        finally:
+            # Persist login attempt result
+            self.sql.sqlite_log_login_attempt(self.botId, nick, host, userId, success_local)
+
+    ThreadWorker(target=_do_auth_check, name=f"auth_{nick}").start()
 
 
 def cmd_newpass(self, channel, feedback, nick, host, msg):
@@ -294,7 +351,7 @@ def cmd_uptime(self, channel, feedback, nick, host, msg):
     # RAM and CPU
     mem_info = process.memory_info()
     rss_mb = mem_info.rss / (1024 * 1024)
-    cpu_percent = process.cpu_percent(interval=0.5)
+    cpu_percent = process.cpu_percent(interval=None)
 
     # total RAM
     total_mem_mb = psutil.virtual_memory().total / (1024 * 1024)
