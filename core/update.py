@@ -10,6 +10,7 @@ import zipfile
 import tempfile
 import re
 from pathlib import Path
+from twisted.internet import reactor
 
 GITHUB_REPO = "https://github.com/tclscripts/BlackBoT"
 BRANCH = "main"
@@ -153,7 +154,7 @@ def update_from_github(self, feedback):
                 f.write(remote_version)
 
             self.send_message(feedback, "✅ Update complete. Restarting...")
-            self.restart("✨ Updating... Be right back with fresh powers!")
+            reactor.callLater(2, self.restart, "✨ Updating... Be right back with fresh powers!")
 
     except Exception as e:
         self.send_message(feedback, f"❌ Update failed: {e}")
