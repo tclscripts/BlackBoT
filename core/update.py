@@ -137,7 +137,6 @@ def update_from_github(self, feedback):
                     dst = dest_dir / file
 
                     if file == CONFIG_FILE:
-                        # Fuzionează setările în fișierul local
                         with open(src, "r", encoding="utf-8") as f:
                             new_content = f.read()
                         merged = merge_settings(old_settings, new_content)
