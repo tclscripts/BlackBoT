@@ -3,8 +3,9 @@
 **BlackBoT** is a powerful and modular IRC bot built with Python and Twisted, featuring channel moderation, user authentication, role-based access control, and automatic update support via GitHub.
 
 📣 BlackBoT Best Connect Time Contest
-Check out uptime.tclscripts.net to monitor your bot’s status and track your performance.
+Check out https://uptime.tclscripts.net to monitor your bot’s status and track your performance.
 
+--
 
 > ⚠️ This project is currently in progress and may contain bugs or unfinished features.
 
