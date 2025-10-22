@@ -17,7 +17,6 @@ from collections import defaultdict, deque
 sys.path.append(os.path.join(os.path.dirname(__file__), 'core'))
 from core import commands
 from core import Variables as v
-from core import SQL
 from core.commands_map import command_definitions
 from core.threading_utils import ThreadWorker
 from core.sql_manager import SQLManager
@@ -28,8 +27,9 @@ from core.monitor_client import ensure_enrollment, send_heartbeat
 import platform
 from twisted.internet.threads import deferToThread
 
+
 class TTLCache(OrderedDict):
-    def __init__(self, maxlen=2000, ttl=6*3600):
+    def __init__(self, maxlen=2000, ttl=6 * 3600):
         super().__init__()
         self.maxlen = maxlen
         self.ttl = ttl
@@ -61,6 +61,7 @@ class TTLCache(OrderedDict):
         # ține doar ultimele maxlen (LRU)
         while len(self) > self.maxlen:
             self.popitem(last=False)
+
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 
@@ -110,16 +111,15 @@ class Bot(irc.IRCClient):
         self.clean_logged_users(silent=True)
         self.thread_check_logged_users_started = False
         self.known_users = set()  # (channel, nick)
-        self.user_cache = TTLCache(maxlen=2000, ttl=6*3600)
+        self.user_cache = TTLCache(maxlen=2000, ttl=6 * 3600)
         self.flood_tracker = defaultdict(lambda: deque())
         self.current_start_time = time.time()
         self.sqlite3_database = s.sqlite3_database
         self.sql = SQLManager.get_instance()
         self.newbot = self.sql.sqlite3_bot_birth(self.username, self.nickname, self.realname,
-                                                     self.away)
+                                                 self.away)
         self.botId = self.newbot[1]
         self.host_to_nicks = defaultdict(set)
-
 
         # ⏱️ Uptime update thread
         self.thread_update_uptime = ThreadWorker(
@@ -176,7 +176,8 @@ class Bot(irc.IRCClient):
                 self.monitor_enabled = False
                 return
 
-            self.monitorId = creds["bot_id"] # de pus alt nume pentru a adauga in monitor, coincide cu botId din baza de date
+            self.monitorId = creds[
+                "bot_id"]  # de pus alt nume pentru a adauga in monitor, coincide cu botId din baza de date
             self.hmac_secret = creds["hmac_secret"]
             self.monitor_enabled = True
             print(f"✅ Monitor enrolled (bot_id={self.monitorId[:8]}...). Starting heartbeat.")
@@ -678,7 +679,7 @@ class Bot(irc.IRCClient):
     def is_logged_in(self, userId, host):
         return userId in self.logged_in_users and host in self.logged_in_users[userId]["hosts"]
 
-    #schedule for rejoining channel
+    # schedule for rejoining channel
     def _schedule_rejoin(self, channel):
         if channel not in self.rejoin_pending:
             return
@@ -706,7 +707,7 @@ class Bot(irc.IRCClient):
         self.join(channel)
 
     def load_commands(self):
-        
+
         self.commands = []
         for cmd in command_definitions:
             func = getattr(commands, f"cmd_{cmd['name']}", None)
@@ -980,19 +981,29 @@ class Bot(irc.IRCClient):
         return found
 
     def get_hostname(self, nick, host, host_type):
-        ident = host.split("!")[0]
-        host = host.split("@")[1]
-        formats = {
-            1: f"*!*@{host}",
-            2: f"*!{ident}@{host}",
-            3: f"{nick}!{ident}@{host}",
-            4: f"{nick}!*@*",
-            5: f"*!{ident}@*"
-        }
-        if host_type > 0:
-            formats.get(type, "Invalid format type")
+        # host poate fi "ident@host" SAU "nick!ident@host"
+        if "!" in host:
+            _, rest = host.split("!", 1)  # rest = "ident@host"
         else:
-            return formats.get(s.default_hostname, "Invalid format type")
+            rest = host
+
+        if "@" not in rest:
+            return "Invalid format type"
+
+        ident, host_only = rest.split("@", 1)
+
+        formats = {
+            1: f"*!*@{host_only}",
+            2: f"*!{ident}@{host_only}",
+            3: f"{nick}!{ident}@{host_only}",
+            4: f"{nick}!*@*",
+            5: f"*!{ident}@*",
+        }
+
+        if host_type > 0:
+            return formats.get(host_type, "Invalid format type")
+        else:
+            return formats.get(getattr(s, "default_hostname", 2), "Invalid format type")
 
     # channel privileges
     def user_is_voice(self, nick, chan):
@@ -1074,7 +1085,6 @@ class Bot(irc.IRCClient):
                     self.send_message(feedback, f"⚠️ Module not loaded: {mod_name}")
 
             self.load_commands()
-
 
             self.sql.selfbot = self
 
@@ -1220,7 +1230,7 @@ def server_choose_to_connect():
         elif connect == 1:
             print(f"Invalid server {first_server} from the list, trying another one..")
             servers_order += 1
-            if servers_order > len(s.servers):
+            if servers_order >= len(s.servers):
                 servers_order = 0
         else:
             valid_server = True
