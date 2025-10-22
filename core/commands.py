@@ -1,8 +1,8 @@
-from SQL import SQL
+from core.SQL import SQL
 import time
 from core import update
 import settings as s
-import Variables as v
+from core import Variables as v
 import threading
 import os
 from datetime import datetime
@@ -406,6 +406,9 @@ def cmd_say(self, channel, feedback, nick, host, msg):  # say command
     result = self.check_command_access(channel, nick, host, '4', feedback)
     if not result:
         return
+    sql = result['sql']
+    if not result:
+        return
     self.send_message(feedback, msg)
 
 
@@ -437,7 +440,7 @@ def cmd_delchan(self, channel, feedback, nick, host, msg):
         if channel in self.notOnChannels:
             self.notOnChannels.remove(channel)
         if self.channel_details:
-            self.channel_details = [arr for arr in self.channel_details if channel in arr]
+            self.channel_details = [arr for arr in self.channel_details if channel not in arr]
         sql_instance.sqlite3_delchan(channel, self.botId)
         self.send_message(feedback, "Removed channel '{}' from my database".format(channel))
     else:
@@ -455,7 +458,7 @@ def cmd_jump(self, channel, feedback, nick, host, msg):  # jump command
 
 def cmd_hello(self, channel, feedback, nick, host, msg):
     if not self.unbind_hello:
-        sql_instance = SQL(self.sql.ite3_database)
+        sql_instance = self.sql
         userId = sql_instance.sqlite_add_user(self.botId, nick, '')
         accessId = sql_instance.sqlite_get_access_id('N')
         hostname = self.get_hostname(nick, host, 0)

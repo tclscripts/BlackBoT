@@ -56,6 +56,6 @@
 # implemented autoupdate timer
 # added option to not enter to channels, only on main, if not identifed to nickserv
 # solved issues regarding auto login for more than 1 user with the same host
+# solved issues related to auto update
 ----------------------------------------------------------------------------------
-- to solve issues related to update
-- to check if users are removed from memory if they quit or part
+

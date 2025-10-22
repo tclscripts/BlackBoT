@@ -66,7 +66,7 @@ bot = {
 }
 
 # list that contains the access types
-access_list = [boss_owner, owner, master, manager, admin, op, voice, protect, protect, bot]
+access_list = [boss_owner, owner, master, manager, admin, op, voice, protect, bot]
 
 # settings list (you can set default values here, for flags the values are 0 for disable and 1 for enabled)
 # type for settings 1 (it's value is a string), 0 (it's value is a flag, like +setting or -setting)

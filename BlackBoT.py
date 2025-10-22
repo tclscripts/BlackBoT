@@ -23,6 +23,10 @@ from core.threading_utils import ThreadWorker
 from core.sql_manager import SQLManager
 from collections import OrderedDict
 import time
+import psutil
+from core.monitor_client import ensure_enrollment, send_heartbeat
+import platform
+from twisted.internet.threads import deferToThread
 
 class TTLCache(OrderedDict):
     def __init__(self, maxlen=2000, ttl=6*3600):
@@ -64,8 +68,21 @@ servers_order = 0
 channelStatusChars = "~@+%"
 current_instance = None
 
+
+def _load_version():
+    try:
+        with open("VERSION", "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return "unknown"
+
+
 class Bot(irc.IRCClient):
     def __init__(self, nickname, realname):
+
+        self.version = _load_version()
+        self.monitor_enabled = None
+        self.hmac_secret = None
         self.commands = None
         self.current_connect_time = 0
         self.current_start_time = 0
@@ -75,6 +92,8 @@ class Bot(irc.IRCClient):
         self.nickname = nickname
         self.realname = realname
         self.away = s.away
+        self.server = None
+        self.port = None
         self.username = s.username
         self.newbot = 0
         self.botId = 0
@@ -136,6 +155,94 @@ class Bot(irc.IRCClient):
         else:
             self.unbind_hello = False
 
+    def _on_reactor(self, func, *args, **kwargs):
+        from twisted.internet import reactor
+        reactor.callFromThread(func, *args, **kwargs)
+
+    def irc_msg(self, channel: str, message: str):
+        self._on_reactor(self.msg, channel, message)
+
+    def irc_sendline(self, line: str):
+        self._on_reactor(self.sendLine, line.encode("utf-8"))
+
+    def _monitor_init_worker(self):
+        try:
+            server_str = f"{self.server}:{self.port}" if self.server and self.port else "unknown"
+            version = getattr(self, "version", "unknown")
+
+            creds = ensure_enrollment(self.nickname, version, server_str)
+            if not creds:
+                print("⚠️ Monitor enrollment pending/failed; monitoring disabled for now.")
+                self.monitor_enabled = False
+                return
+
+            self.monitorId = creds["bot_id"] # de pus alt nume pentru a adauga in monitor, coincide cu botId din baza de date
+            self.hmac_secret = creds["hmac_secret"]
+            self.monitor_enabled = True
+            print(f"✅ Monitor enrolled (bot_id={self.monitorId[:8]}...). Starting heartbeat.")
+            # start heartbeat pe threadpool tot cu deferToThread
+            reactor.callFromThread(self._start_heartbeat_loop)
+
+        except Exception as e:
+            import traceback
+            print(f"❌ Monitor init error: {e}")
+            traceback.print_exc()
+            self.monitor_enabled = False
+
+    def _start_monitor_init_async(self):
+        if getattr(self, "_monitor_init_started", False):
+            return
+        self._monitor_init_started = True
+        # rulează worker-ul în threadpool-ul Twisted
+        d = deferToThread(self._monitor_init_worker)
+        d.addErrback(lambda f: print(f"❌ monitor_init errback: {f.getErrorMessage()}"))
+
+    def _collect_metrics(self):
+        ram_mb = 0.0
+        if psutil:
+            try:
+                ram_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+            except Exception:
+                pass
+        try:
+            server_str = f"{self.server}:{self.port}" if self.server and self.port else "unknown"
+        except Exception:
+            server_str = "unknown"
+        payload = {
+            "bot_id": str(self.monitorId),
+            "nickname": self.nickname,
+            "version": getattr(self, "version", "unknown"),
+            "system": f"{platform.system()} {platform.release()}",
+            "cpu_model": platform.processor(),
+            "server": server_str,
+            "ram_mb": float(f"{ram_mb:.2f}"),
+            "ip": getattr(self, "public_ip", None),
+        }
+        return payload
+
+    def _start_heartbeat_loop(self):
+        if getattr(self, "_hb_thread", None):
+            return
+
+        def _loop():
+            interval = 30
+            backoff = interval
+            while getattr(self, "monitor_enabled", False):
+                try:
+                    payload = self._collect_metrics()
+                    ok = send_heartbeat(self.monitorId, self.hmac_secret, payload)
+                    if ok:
+                        backoff = interval
+                    else:
+                        backoff = min(backoff * 2, 300)
+                except Exception:
+                    backoff = min(backoff * 2, 300)
+                time.sleep(backoff)
+
+        self._hb_thread = ThreadWorker(target=_loop, name=f"heartbeat_{self.nickname}")
+        self._hb_thread.daemon = True
+        self._hb_thread.start()
+
     def userQuit(self, user, message):
         # logout on quit
         self.logoutOnQuit(user)
@@ -144,6 +251,11 @@ class Bot(irc.IRCClient):
         print("Signed on to the server")
         # load commands
         self.load_commands()
+        try:
+            self._start_monitor_init_async()
+        except Exception as e:
+            print(f"⚠️ Monitor init failed: {e}")
+            self.monitor_enabled = False
         # reset known users and user_cache
         if self.known_users:
             print("🔄 Resetting user caches.")
@@ -281,7 +393,7 @@ class Bot(irc.IRCClient):
             try:
                 channel, message = self.message_queue.get(timeout=1)
                 if channel and message:
-                    self.msg(channel, message)
+                    reactor.callFromThread(self.msg, channel, message)
                 time.sleep(self.message_delay)
             except queue.Empty:
                 continue
@@ -828,7 +940,7 @@ class Bot(irc.IRCClient):
             time.sleep(5)
 
     def check_access(self, channel, userId, flags):
-        sql_instance = SQL.SQL(self.sqlite3_database)
+        sql_instance = self.sql
         if sql_instance.sqlite_has_access_flags(self.botId, userId, flags):
             return True
         if sql_instance.sqlite_has_access_flags(self.botId, userId, flags, channel):
@@ -996,11 +1108,15 @@ class BotFactory(protocol.ReconnectingClientFactory):
         self.nickname = nickname
         self.realname = realname
         self.away = s.away
+        self.server = None
+        self.port = None
 
     def buildProtocol(self, addr):
         global current_instance
         bot = Bot(self.nickname, self.realname)
         bot.factory = self
+        bot.server = self.server
+        bot.port = self.port
         current_instance = bot
         return bot
 
@@ -1012,6 +1128,8 @@ class BotFactory(protocol.ReconnectingClientFactory):
         if servers_order >= len(s.servers):
             servers_order = 0
         get_server = server_choose_to_connect()
+        self.server = get_server[0]
+        self.port = get_server[1]
         if s.ssl_use == 1:
             sslContext = ssl.ClientContextFactory()
             sslContext.method = ssl.PROTOCOL_TLSv1_2
