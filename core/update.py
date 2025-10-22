@@ -9,8 +9,18 @@ import shutil
 import zipfile
 import tempfile
 import re
+import logging
 from pathlib import Path
 from twisted.internet import reactor
+
+# configurare logger local pentru update
+logger = logging.getLogger("BlackBoT.update")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 GITHUB_REPO = "https://github.com/tclscripts/BlackBoT"
 BRANCH = "main"
@@ -18,21 +28,31 @@ VERSION_FILE = "VERSION"
 CONFIG_FILE = "settings.py"
 
 def read_local_version():
-    if os.path.exists(Path(__file__).resolve().parent.parent / VERSION_FILE):
-        with open(Path(__file__).resolve().parent.parent / VERSION_FILE, "r") as f:
-            return f.read().strip()
+    path = Path(__file__).resolve().parent.parent / VERSION_FILE
+    if path.exists():
+        with open(path, "r") as f:
+            v = f.read().strip()
+            logger.info(f"Local version found: {v}")
+            return v
+    logger.info("No local VERSION file, defaulting to 0.0.0")
     return "0.0.0"
 
 def fetch_remote_version():
     import requests
     url = f"{GITHUB_REPO}/raw/{BRANCH}/{VERSION_FILE}"
+    logger.info(f"Fetching remote VERSION from {url}")
     r = requests.get(url, timeout=15)
     if r.status_code == 200:
-        return r.text.strip()
+        v = r.text.strip()
+        logger.info(f"Remote VERSION = {v}")
+        return v
+    logger.warning(f"Failed to fetch remote VERSION (status={r.status_code})")
     return None
 
 def parse_settings(file_path):
     settings = {}
+    if not os.path.exists(file_path):
+        return settings
     with open(file_path, "r") as f:
         for line in f:
             match = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+)", line)
@@ -73,22 +93,27 @@ def merge_settings(old_settings, new_settings_content):
     return "\n".join(merged)
 
 def _choose_extracted_root(tmpdir: Path) -> Path:
-    # Caută primul director rezultat din unzip (de obicei "BlackBoT-main")
     for entry in tmpdir.iterdir():
         if entry.is_dir():
             return entry
     raise RuntimeError("Zip extracted but no directory found.")
 
+def _replace_dir(src_dir: Path, dst_dir: Path):
+    if dst_dir.exists():
+        logger.info(f"Removing old directory: {dst_dir}")
+        shutil.rmtree(dst_dir)
+    logger.info(f"Copying new directory {src_dir} -> {dst_dir}")
+    shutil.copytree(src_dir, dst_dir)
+
 def _project_root() -> Path:
-    # core/update.py -> core/ -> project root
     return Path(__file__).resolve().parent.parent
 
 def _copy_file_atomic(src: Path, dst: Path):
     dst.parent.mkdir(parents=True, exist_ok=True)
-    # Copiere într-un tmp și apoi replace atomic (unde OS permite)
     tmp = dst.with_suffix(dst.suffix + ".updtmp")
     shutil.copy2(src, tmp)
     os.replace(tmp, dst)
+    logger.debug(f"Copied {src} -> {dst}")
 
 def update_from_github(self, feedback):
     import requests
@@ -96,12 +121,14 @@ def update_from_github(self, feedback):
     local_version = read_local_version()
     remote_version = fetch_remote_version()
 
-    if not remote_version or remote_version <= local_version:
-        self.send_message(feedback, f"✅ Already up to date (version {local_version})")
+    if not remote_version:
+        logger.warning("Remote VERSION not available, aborting update.")
+        return
+    if remote_version <= local_version:
+        logger.info(f"Already up to date: {local_version}")
         return
 
-    self.send_message(feedback, f"🔄 Update available: {remote_version} (current: {local_version})")
-
+    logger.info(f"Update available: {remote_version} (current {local_version})")
     zip_url = f"{GITHUB_REPO}/archive/refs/heads/{BRANCH}.zip"
 
     try:
@@ -109,52 +136,63 @@ def update_from_github(self, feedback):
             tmpdir = Path(tmpdir_str)
             zip_path = tmpdir / "update.zip"
 
+            logger.info(f"Downloading archive {zip_url}")
             r = requests.get(zip_url, timeout=60)
             r.raise_for_status()
             with open(zip_path, "wb") as f:
                 f.write(r.content)
 
+            logger.info(f"Extracting {zip_path}")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(tmpdir)
 
             extracted_dir = _choose_extracted_root(tmpdir)
             project_root = _project_root()
+            logger.info(f"Extracted to {extracted_dir}, project root is {project_root}")
 
-            self.send_message(feedback, f"📦 Extracted: {extracted_dir.name}")
-            self.send_message(feedback, f"📁 Project root: {project_root}")
+            # replace complet core/
+            src_core = extracted_dir / "core"
+            dst_core = project_root / "core"
+            if src_core.exists():
+                py_files = list(src_core.rglob("*.py"))
+                logger.info(f"core/ in archive has {len(py_files)} files")
+                for f in py_files[:10]:
+                    logger.debug(f"   {f.relative_to(extracted_dir)}")
+                _replace_dir(src_core, dst_core)
 
-            # Backup & merge settings
             local_settings = project_root / CONFIG_FILE
             old_settings = parse_settings(local_settings) if local_settings.exists() else {}
 
-            # Copiază TOT (mai puțin settings.py) în proiect
             for root, _, files in os.walk(extracted_dir):
                 root = Path(root)
                 rel_path = root.relative_to(extracted_dir)
-                dest_dir = project_root / rel_path
 
+                if rel_path.parts and rel_path.parts[0] == "core":
+                    continue
+
+                dest_dir = project_root / rel_path
                 for file in files:
                     src = root / file
                     dst = dest_dir / file
 
                     if file == CONFIG_FILE:
+                        logger.info("Merging settings.py")
                         with open(src, "r", encoding="utf-8") as f:
                             new_content = f.read()
                         merged = merge_settings(old_settings, new_content)
                         with open(local_settings, "w", encoding="utf-8") as f:
                             f.write(merged)
-                        self.send_message(feedback, f"🛠️ Merged settings preserved in {CONFIG_FILE}")
                     elif file == "update.zip":
                         continue
                     else:
+                        logger.debug(f"Copying {src.relative_to(extracted_dir)}")
                         _copy_file_atomic(src, dst)
 
-            # Scrie versiunea nouă în rădăcina proiectului
             with open(project_root / VERSION_FILE, "w", encoding="utf-8") as f:
                 f.write(remote_version)
-
-            self.send_message(feedback, "✅ Update complete. Restarting...")
+            logger.info("Update complete, restarting bot in 2s…")
             reactor.callLater(2, self.restart, "✨ Updating... Be right back with fresh powers!")
 
     except Exception as e:
-        self.send_message(feedback, f"❌ Update failed: {e}")
+        import traceback
+        logger.error(f"Update failed: {e}\n{traceback.format_exc()}")
