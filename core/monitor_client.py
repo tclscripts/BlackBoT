@@ -3,7 +3,7 @@ import os, json, time, stat, platform, hmac, hashlib, requests, socket, uuid
 
 
 # Unde se salvează credențialele botului
-CRED_PATH = os.getenv("BLACKBOT_CRED", "../files/cred.json")
+CRED_PATH = os.getenv("BLACKBOT_CRED", "./files/cred.json")
 
 def _read_creds():
     try:
