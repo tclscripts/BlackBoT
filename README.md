@@ -5,6 +5,7 @@
 📣 BlackBoT Best Connect Time Contest
 Check out uptime.tclscripts.net to monitor your bot’s status and track your performance.
 
+
 > ⚠️ This project is currently in progress and may contain bugs or unfinished features.
 
 ---
