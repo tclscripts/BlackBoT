@@ -42,6 +42,33 @@ def like_from_wildcard(pattern: str) -> str:
     p = p.replace("*", "%").replace("?", "_")
     return p
 
+# ---------- DDL / bootstrap ----------
+
+def ensure_tables(sql):
+    """
+    Creates SEEN if missing (including join_ts) + indexes & unique key.
+    """
+    sql.sqlite3_execute("""
+        CREATE TABLE IF NOT EXISTS SEEN (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            botId INTEGER NOT NULL,
+            channel TEXT NOT NULL,
+            nick TEXT NOT NULL,
+            host TEXT,
+            ident TEXT,
+            last_event TEXT NOT NULL,       -- JOIN|PART|KICK|QUIT|NICK
+            reason TEXT,                    -- optional (kick/part reason)
+            last_ts INTEGER NOT NULL,       -- last activity timestamp
+            join_ts INTEGER                 -- last JOIN timestamp (persisted)
+        );
+    """)
+    sql.sqlite3_execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_seen_unique
+        ON SEEN(botId, channel, nick COLLATE NOCASE);
+    """)
+    sql.sqlite3_execute("CREATE INDEX IF NOT EXISTS idx_seen_ts ON SEEN(last_ts DESC);")
+    sql.sqlite3_execute("CREATE INDEX IF NOT EXISTS idx_seen_host ON SEEN(host);")
+
 # ---------- Core write (UPSERT) ----------
 
 def _upsert(sql, botId: int, channel: str, nick: str,
