@@ -1,4 +1,3 @@
-from core.SQL import SQL
 import time
 from core import update
 import settings as s
@@ -8,6 +7,7 @@ import os
 from datetime import datetime
 from core.threading_utils import ThreadWorker
 from twisted.internet import reactor
+import core.seen as seen
 
 def cmd_status(self, channel, feedback, nick, host, msg):
     import psutil
@@ -506,7 +506,7 @@ def cmd_restart(self, channel, feedback, nick, host, msg):
 
 def cmd_cycle(self, channel, feedback, nick, host, msg):
     if channel.lower() == self.nickname.lower():
-        self.send_message(feedback, "⚠️ Usage: cycle <#channel>")
+        self.send_message(feedback, f"⚠️ Usage: {s.char}cycle <#channel>")
         return
     result = self.check_command_access(channel, nick, host, '9', feedback)
     if not result:
@@ -540,7 +540,7 @@ def cmd_add(self, channel, feedback, nick, host, msg):
 
     args = msg.strip().split()
     if len(args) < 2:
-        self.send_message(feedback, "⚠️ Usage: .add <role> <nick1> <nick2> ...")
+        self.send_message(feedback, f"⚠️ Usage: {s.char}add <role> <nick1> <nick2> ...")
         return
 
     role = args[0].lower()
@@ -569,7 +569,6 @@ def cmd_add(self, channel, feedback, nick, host, msg):
     if not result:
         return
 
-    sql = result["sql"]
     userId = result["userId"]
     issuer_flag = self.sql.sqlite_get_max_flag(self.botId, userId, channel)
 
@@ -663,7 +662,6 @@ def cmd_userlist(self, channel, feedback, nick, host, msg):
     if not access:
         return
 
-    sql = access['sql']
     userId = access['userId']
     botId = self.botId
 
@@ -715,7 +713,7 @@ def cmd_delacc(self, channel, feedback, nick, host, msg):
 
     args = msg.strip().split()
     if not args:
-        self.send_message(feedback, "⚠️ Usage: .del <nick1> <nick2> ...")
+        self.send_message(feedback, f"⚠️ Usage: {s.char}del <nick1> <nick2> ...")
         return
 
     sql = result["sql"]
@@ -789,10 +787,9 @@ def cmd_del(self, channel, feedback, nick, host, msg):
 
     args = msg.strip().split()
     if not args:
-        self.send_message(feedback, "⚠️ Usage: .del <username>")
+        self.send_message(feedback, f"⚠️ Usage: {s.char}del <username>")
         return
 
-    sql = result["sql"]
     userId = result["userId"]
     issuer_flag = self.sql.sqlite_get_max_flag(self.botId, userId, channel)
 
@@ -830,15 +827,30 @@ def cmd_del(self, channel, feedback, nick, host, msg):
         self.sql.sqlite_delete_user(self.botId, target_id)
         self.send_message(feedback, f"🗑️ User '{username}' and all their data have been deleted.")
 
+def cmd_seen(self, channel, feedback, nick, host, msg):
+    result = self.check_command_access(channel, nick, host, '31', feedback)
+    if not result:
+        return
+
+    pattern = (msg or "").strip().split()[0] if msg else ""
+    if not pattern:
+        self.send_message(feedback, f"Usage: {s.char}seen <nick|host|pattern>")
+        return
+
+    # Folosește canalul curent ca hint doar dacă e un canal (#...)
+    channel_hint = channel if channel.startswith("#") else None
+
+    # Pasează bot=self ca să poată verifica live dacă userul e pe canal chiar dacă nu are rând în SEEN
+    text = seen.format_seen(self.sql, self.botId, pattern, channel_hint=channel_hint, bot=self)
+    self.send_message(feedback, text)
 
 def cmd_info(self, channel, feedback, nick, host, msg):
     global thost_mask
     if channel.lower() == self.nickname.lower():
-        self.send_message(feedback, "⚠️ Usage: info <#channel|user>")
+        self.send_message(feedback, f"⚠️ Usage: {s.char}info <#channel|user>")
         return
     arg = msg.strip()
 
-    lhost = self.get_hostname(nick, host, 0)
     result = self.check_command_access(channel, nick, host, '24', feedback)
     if not result:
         return
@@ -911,7 +923,6 @@ def cmd_info(self, channel, feedback, nick, host, msg):
                                 f"➤ Access - Global: {global_str}, Local on {channel}: {local_str}\n"
                                 f"➤ Added by: {added_by or '-'} / Last modified by: {last_modified_by or '-'}\n"
                                 f"🔧 Settings:\n{settings_str}")
-
 
 
 

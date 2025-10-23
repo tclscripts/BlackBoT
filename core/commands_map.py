@@ -48,5 +48,7 @@ command_definitions = [
     {'name': 'update', 'description': 'Update command used to check for updates or start update',
      'flags': 'N', 'id': '29'},
     {'name': 'status', 'description': 'Get info about bot\'s internal stuff',
-     'flags': 'Nn', 'id': '30'}
+     'flags': 'Nn', 'id': '30'},
+    {'name': 'seen', 'description': 'See info about users (when they joined, parted, quit or how much they stayed',
+     'flags': '-', 'id': '31'}
 ]

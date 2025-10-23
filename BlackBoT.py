@@ -20,12 +20,14 @@ from core import Variables as v
 from core.commands_map import command_definitions
 from core.threading_utils import ThreadWorker
 from core.sql_manager import SQLManager
+from core import seen
 from collections import OrderedDict
 import time
 import psutil
 from core.monitor_client import ensure_enrollment, send_heartbeat
 import platform
 from twisted.internet.threads import deferToThread
+
 
 
 class TTLCache(OrderedDict):
@@ -118,6 +120,7 @@ class Bot(irc.IRCClient):
         self.sql = SQLManager.get_instance()
         self.newbot = self.sql.sqlite3_bot_birth(self.username, self.nickname, self.realname,
                                                  self.away)
+        seen.ensure_tables(self.sql)
         self.botId = self.newbot[1]
         self.host_to_nicks = defaultdict(set)
 
@@ -247,6 +250,8 @@ class Bot(irc.IRCClient):
     def userQuit(self, user, message):
         # logout on quit
         self.logoutOnQuit(user)
+        nick = user.split('!')[0]
+        seen.on_quit(self.sql, self.botId, nick, message)
 
     def signedOn(self):
         print("Signed on to the server")
@@ -292,14 +297,21 @@ class Bot(irc.IRCClient):
     def userJoined(self, user, channel):
         if self.channel_details:
             self.sendLine(f"WHO {user}")
+        nick = user.split('!')[0]
+        ident = user.split('!')[1].split('@')[0] if '!' in user and '@' in user else ''
+        host = user.split('@')[1] if '@' in user else ''
+        seen.on_join(self.sql, self.botId, channel, nick, ident, host)
 
     def userLeft(self, user, channel):
         if self.channel_details:
             self.channel_details = [arr for arr in self.channel_details if not (channel in arr and user in arr)]
+        nick = user.split('!')[0]
+        seen.on_part(self.sql, self.botId, channel, nick, reason="left")
 
     def userKicked(self, kicked, channel, kicker, message):
         if self.channel_details:
             self.channel_details = [arr for arr in self.channel_details if not (channel in arr and kicked in arr)]
+        seen.on_kick(self.sql, self.botId, channel, kicked, kicker, message)
 
     def kickedFrom(self, channel, kicker, message):
         if channel not in self.notOnChannels:
@@ -310,6 +322,7 @@ class Bot(irc.IRCClient):
 
     def userRenamed(self, oldnick, newnick):
         print(f"🔄 Nick change detected: {oldnick} → {newnick}")
+        seen.on_nick_change(self.sql, self.botId, oldnick, newnick)
 
         for user in self.channel_details:
             if user[1] == oldnick:
@@ -322,6 +335,7 @@ class Bot(irc.IRCClient):
             else:
                 updated_known.add((chan, nick))
         self.known_users = updated_known
+        seen.hook_user_renamed(self, self.seen_store, oldnick, newnick)
 
         updated_cache = {}
         for (nick, host), userId in self.user_cache.items():
@@ -419,6 +433,15 @@ class Bot(irc.IRCClient):
         return False
 
     def check_command_access(self, channel, nick, host, flag_id, feedback=None):
+        flags_needed = self.get_flags(flag_id)
+        if not flags_needed or str(flags_needed).strip() in ("-", ""):
+            return {
+                "sql": self.sql,
+                "userId": None,
+                "handle": nick,  # fallback
+                "lhost": self.get_hostname(nick, host, 0),
+                "public": True
+            }
         lhost = self.get_hostname(nick, host, 0)
         info = self.sql.sqlite_handle(self.botId, nick, host)
 
@@ -435,7 +458,7 @@ class Bot(irc.IRCClient):
                 return None
             handle = self.logged_in_users[userId].get("nick", nick)  # fallback to nick if missing
 
-        flags_needed = self.get_flags(flag_id)
+
         if not self.check_access(channel, userId, flags_needed):
             return None
         stored_hash = self.sql.sqlite_get_user_password(userId)
@@ -1075,7 +1098,7 @@ class Bot(irc.IRCClient):
 
             # Reload all important modules
             modules_to_reload = [
-                'core.commands', 'core.update', 'core.SQL', 'core.Variables', 'settings'
+                'core.commands', 'core.update', 'core.SQL', 'core.Variables', 'settings', 'core.seen'
             ]
             for mod_name in modules_to_reload:
                 mod = sys.modules.get(mod_name)
