@@ -653,6 +653,55 @@ class SQL:
         ch = self.sqlite_select(query_ch, (botId, userId))
         return ch[0] if ch else (None, None)
 
+    def create_seen_tables(self):
+        """
+        Creates SEEN if missing (including join_ts) + indexes & unique key.
+        """
+        self.sqlite3_execute("""
+                            CREATE TABLE IF NOT EXISTS SEEN
+                            (
+                                id
+                                INTEGER
+                                PRIMARY
+                                KEY
+                                AUTOINCREMENT,
+                                botId
+                                INTEGER
+                                NOT
+                                NULL,
+                                channel
+                                TEXT
+                                NOT
+                                NULL,
+                                nick
+                                TEXT
+                                NOT
+                                NULL,
+                                host
+                                TEXT,
+                                ident
+                                TEXT,
+                                last_event
+                                TEXT
+                                NOT
+                                NULL,   -- JOIN|PART|KICK|QUIT|NICK
+                                reason
+                                TEXT,   -- optional (kick/part reason)
+                                last_ts
+                                INTEGER
+                                NOT
+                                NULL,   -- last activity timestamp
+                                join_ts
+                                INTEGER -- last JOIN timestamp (persisted)
+                            );
+                            """)
+        self.sqlite3_execute("""
+                            CREATE UNIQUE INDEX IF NOT EXISTS idx_seen_unique
+                                ON SEEN(botId, channel, nick COLLATE NOCASE);
+                            """)
+        self.sqlite3_execute("CREATE INDEX IF NOT EXISTS idx_seen_ts ON SEEN(last_ts DESC);")
+        self.sqlite3_execute("CREATE INDEX IF NOT EXISTS idx_seen_host ON SEEN(host);")
+
     def sqlite3_createTables(self):
         users_query = """ CREATE TABLE IF NOT EXISTS USERS (
                                botId INTEGER NOT NULL,
@@ -793,6 +842,7 @@ class SQL:
         self.sqlite3_execute(global_access)
         self.sqlite3_execute(user_logins)
         self.sqlite3_execute(ignores)
+        self.create_seen_tables()
 
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_users_bot ON USERS(botId)",

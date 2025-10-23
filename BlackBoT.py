@@ -120,7 +120,7 @@ class Bot(irc.IRCClient):
         self.sql = SQLManager.get_instance()
         self.newbot = self.sql.sqlite3_bot_birth(self.username, self.nickname, self.realname,
                                                  self.away)
-        seen.ensure_tables(self.sql)
+
         self.botId = self.newbot[1]
         self.host_to_nicks = defaultdict(set)
 
