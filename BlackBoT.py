@@ -6,7 +6,6 @@ import os
 import queue
 import logging
 import Starter
-import core.threading_utils
 import settings as s
 import socket
 from twisted.internet import protocol, ssl, reactor
@@ -83,7 +82,12 @@ def _load_version():
 
 class Bot(irc.IRCClient):
     def __init__(self, nickname, realname):
-
+        try:
+            peer = self.transport.getPeer()
+            self.server = getattr(self.factory, "server", None) or getattr(peer, "host", None)
+            self.port = getattr(self.factory, "port", None) or getattr(peer, "port", None)
+        except Exception:
+            pass
         self.version = _load_version()
         self.monitor_enabled = None
         self.hmac_secret = None
@@ -954,7 +958,8 @@ class Bot(irc.IRCClient):
     # CTCP version reply
     def ctcpQuery_VERSION(self, user, message, a):
         user = user.split('!')[0]
-        self.notice(user, "\x01VERSION " + s.version)
+        from core.update import read_local_version
+        self.notice(user, "\x01VERSION " + f" I am running BlackBoT v{read_local_version()} — Powered by Python 🐍")
 
     # thread to recover main nick when available
     def recover_nickname(self):
@@ -1165,8 +1170,8 @@ class BotFactory(protocol.ReconnectingClientFactory):
         if servers_order >= len(s.servers):
             servers_order = 0
         get_server = server_choose_to_connect()
-        self.server = get_server[0]
-        self.port = get_server[1]
+        self.server = get_server[2]
+        self.port = int(get_server[1])
         if s.ssl_use == 1:
             sslContext = ssl.ClientContextFactory()
             sslContext.method = ssl.PROTOCOL_TLSv1_2
@@ -1187,6 +1192,7 @@ def server_has_port(server):
 
 def host_resolve(host):
     flag = -1
+    vserver = host
     try:
         ipaddress.IPv4Address(host)
         flag = 0
@@ -1203,20 +1209,20 @@ def host_resolve(host):
         try:
             ip_address = socket.gethostbyname(host)
             resolved = 1
-            return [0, ip_address]
+            return [0, ip_address, vserver]
         except socket.gaierror:
             pass
         if resolved == 0:
             try:
                 results = socket.getaddrinfo(host, None, socket.AF_INET6)
                 ipv6_addresses = [result[4][0] for result in results if result[1] == socket.SOCK_STREAM]
-                return [1, ipv6_addresses[0]]
+                return [1, ipv6_addresses[0], vserver]
             except socket.gaierror:
                 return -1
         else:
             return -1
     else:
-        return [flag, host]
+        return [flag, host, vserver]
 
 
 def server_connect(first_server):  # connect to server
@@ -1241,7 +1247,7 @@ def server_connect(first_server):  # connect to server
         with socket.socket(ssocket, socket.SOCK_STREAM) as sk:
             sk.bind((s.sourceIP, s.sourcePort))  # Bind to the desired source IP
             sk.connect((server, port))
-    return [server, port]
+    return [server, port, irc_server[2]]
 
 
 def server_choose_to_connect():
@@ -1262,4 +1268,4 @@ def server_choose_to_connect():
         else:
             valid_server = True
             server = connect
-    return [server[0], server[1]]
+    return [server[0], server[1], server[2]]

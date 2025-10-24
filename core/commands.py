@@ -367,7 +367,8 @@ def cmd_version (self, channel, feedback, nick, host, msg):
     result = self.check_command_access(channel, nick, host, '20', feedback)
     if not result:
         return
-    self.send_message(feedback, "✨ You're running BlackBoT v1.0 — Powered by Python 🐍")
+    from core.update import read_local_version
+    self.send_message(feedback, f"✨ You're running BlackBoT v{read_local_version()} — Powered by Python 🐍")
 
 
 def cmd_channels(self, channel, feedback, nick, host, msg):
@@ -406,7 +407,6 @@ def cmd_say(self, channel, feedback, nick, host, msg):  # say command
     result = self.check_command_access(channel, nick, host, '4', feedback)
     if not result:
         return
-    sql = result['sql']
     if not result:
         return
     self.send_message(feedback, msg)
