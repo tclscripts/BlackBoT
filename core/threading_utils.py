@@ -6,6 +6,15 @@ import threading
 
 thread_stop_events = {}
 
+def get_event(name: str) -> threading.Event:
+    ev = thread_stop_events.get(name)
+    if ev is None:
+        ev = threading.Event()
+        thread_stop_events[name] = ev
+    return ev
+
+def stop_thread(name: str):
+    get_event(name).set()
 
 class ThreadWorker(threading.Thread):
     def __init__(self, target, name):
@@ -28,3 +37,5 @@ class ThreadWorker(threading.Thread):
 
     def should_stop(self):
         return thread_stop_events[self.name].is_set()
+
+

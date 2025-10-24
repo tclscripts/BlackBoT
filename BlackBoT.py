@@ -21,6 +21,7 @@ from core.commands_map import command_definitions
 from core.threading_utils import ThreadWorker
 from core.sql_manager import SQLManager
 from core import seen
+from core.threading_utils import get_event
 from collections import OrderedDict
 import time
 import psutil
@@ -335,7 +336,6 @@ class Bot(irc.IRCClient):
             else:
                 updated_known.add((chan, nick))
         self.known_users = updated_known
-        seen.hook_user_renamed(self, self.seen_store, oldnick, newnick)
 
         updated_cache = {}
         for (nick, host), userId in self.user_cache.items():
@@ -377,7 +377,8 @@ class Bot(irc.IRCClient):
                     self.notOnChannels.append(channel[0])
 
     def cleanup_ignores(self):
-        while not core.threading_utils.thread_stop_events["ignore_cleanup"].is_set():
+        stop_ev = get_event("ignore_cleanup")
+        while not stop_ev.is_set():
             self.sql.sqlite_cleanup_ignores()
             if not self.sql.sqlite_has_active_ignores(self.botId):
                 print("🛑 No more active ignores. Cleanup thread exiting.")
@@ -956,7 +957,8 @@ class Bot(irc.IRCClient):
 
     # thread to recover main nick when available
     def recover_nickname(self):
-        while not core.threading_utils.thread_stop_events["recover_nick"].is_set():
+        stop_ev = get_event("recover_nick")
+        while not stop_ev.is_set():
             if self.nickname == s.nickname:
                 break
             if self.nick_already_in_use == 1:
@@ -1072,7 +1074,8 @@ class Bot(irc.IRCClient):
         return None
 
     def cleanup_known_users(self):
-        while not core.threading_utils.thread_stop_events["known_users"].is_set():
+        stop_ev = get_event("known_users")
+        while not stop_ev.is_set():
             time.sleep(1800)
             active_nick_channel_pairs = set((c[0], c[1]) for c in self.channel_details)
             before = len(self.known_users)
@@ -1119,8 +1122,8 @@ class Bot(irc.IRCClient):
 
     def auto_update_check_loop(self):
         import core.update as update
-
-        while not core.threading_utils.thread_stop_events["auto_update"].is_set():
+        stop_ev = get_event("auto_update")
+        while not stop_ev.is_set():
             try:
                 if not s.autoUpdateEnabled:
                     break
@@ -1130,7 +1133,7 @@ class Bot(irc.IRCClient):
                     print(f"🔄 Update found → {remote_version} > {local_version}")
                     update.update_from_github(self, "Auto-update")
                     self.restart("🔁 Auto-updated")
-                    break  # Nu mai continua loop-ul, se va reporni
+                    break
             except Exception as e:
                 print(f"⚠️ Auto-update thread error: {e}")
             time.sleep(s.autoUpdateInterval * 60)
