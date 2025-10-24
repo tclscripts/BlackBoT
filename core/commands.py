@@ -123,7 +123,7 @@ def cmd_update(self, channel, feedback, nick, host, msg):
         if not remote_version:
             self.send_message(feedback, "❌ Unable to fetch remote version.")
             return
-        if remote_version > local_version:
+        if remote_version != local_version:
             self.send_message(feedback, f"🔄 Update available: {remote_version} (current: {local_version})")
         else:
             self.send_message(feedback, f"✅ Already up to date (version {local_version})")
