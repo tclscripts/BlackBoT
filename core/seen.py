@@ -107,8 +107,9 @@ def on_quit(sql, botId: int, nick: str, message: Optional[str]):
 
 def on_nick_change(sql, botId: int, oldnick: str, newnick: str):
     """
-    Move per-channel 'seen' state from oldnick -> newnick.
-    Keep join_ts from old row unless target has newer data.
+    When a user renames:
+      - Keep oldnick rows: mark last_event = 'NICK', reason = 'renamed to <newnick>', last_ts = now (keep join_ts)
+      - Upsert newnick rows for the same channels, carrying over host/ident/join_ts and refreshing last_ts = now
     """
     rows = sql.sqlite_select("""
         SELECT channel, host, ident, last_event, reason, last_ts, join_ts
@@ -118,31 +119,38 @@ def on_nick_change(sql, botId: int, oldnick: str, newnick: str):
     if not rows:
         return
 
-    for channel, host, ident, ev, reason, ts, jts in rows:
-        existing = sql.sqlite_select("""
-            SELECT last_ts FROM SEEN
-            WHERE botId = ? AND channel = ? AND nick = ? COLLATE NOCASE;
-        """, (botId, channel, newnick))
-        replace = (not existing) or (existing and ts >= int(existing[0][0]))
-        if replace:
-            sql.sqlite3_insert("""
-                INSERT INTO SEEN (botId, channel, nick, host, ident, last_event, reason, last_ts, join_ts)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(botId, channel, nick)
-                DO UPDATE SET
-                    host       = excluded.host,
-                    ident      = excluded.ident,
-                    last_event = excluded.last_event,
-                    reason     = excluded.reason,
-                    last_ts    = excluded.last_ts,
-                    -- preserve/refresh join_ts only if we moved a JOIN timestamp
-                    join_ts    = CASE
-                                   WHEN excluded.join_ts IS NOT NULL AND excluded.last_event = 'JOIN'
-                                     THEN excluded.join_ts
-                                   ELSE SEEN.join_ts
-                                 END;
-            """, (botId, channel, newnick, host, ident, ev, reason, ts, jts))
-    sql.sqlite3_update("DELETE FROM SEEN WHERE botId = ? AND nick = ? COLLATE NOCASE;", (botId, oldnick))
+    ts_now = now_ts()
+
+    for channel, host, ident, ev, reason, last_ts, jts in rows:
+        # 1) Upsert NEW nick on the same channel, keep join_ts so we can show "since ..."
+        sql.sqlite3_insert("""
+            INSERT INTO SEEN (botId, channel, nick, host, ident, last_event, reason, last_ts, join_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(botId, channel, nick)
+            DO UPDATE SET
+                host       = excluded.host,
+                ident      = excluded.ident,
+                -- keep the *live* state if it was JOIN before (user is still on channel),
+                -- otherwise carry over whatever last_event we had
+                last_event = CASE
+                               WHEN SEEN.last_event = 'JOIN' OR excluded.last_event = 'JOIN'
+                                 THEN 'JOIN'
+                               ELSE excluded.last_event
+                             END,
+                reason     = excluded.reason,
+                last_ts    = ?,
+                -- preserve or carry over the session start
+                join_ts    = COALESCE(SEEN.join_ts, excluded.join_ts)
+        """, (botId, channel, newnick, host, ident, ev, reason, last_ts, jts, ts_now))
+
+        # 2) Mark OLD nick as a nick-change event (do not delete)
+        sql.sqlite3_update("""
+            UPDATE SEEN
+            SET last_event = 'NICK',
+                reason     = ?,
+                last_ts    = ?
+            WHERE botId = ? AND channel = ? AND nick = ? COLLATE NOCASE
+        """, (f"renamed to {newnick}", ts_now, botId, channel, oldnick))
 
 # ---------- Query & formatting ----------
 

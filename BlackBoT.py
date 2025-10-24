@@ -623,10 +623,10 @@ class Bot(irc.IRCClient):
             host = f"{wnickname}!{wident}@{whost}"
             lhost = self.get_hostname(wnickname, f"{wident}@{whost}", 0)
 
-            # 1) memorează nick-ul pe host (set => fără duplicate)
+            # 1) remember which nicks we've seen from this logical host
             self.host_to_nicks[lhost].add(wnickname)
 
-            # 2) dacă există deja un user logat pe acest host, atașează imediat nick-ul
+            # 2) if someone is already logged on this host, attach the nick
             existing_uid = self.get_logged_in_user_by_host(lhost)
             if existing_uid:
                 self.logged_in_users[existing_uid].setdefault("nicks", set()).add(wnickname)
@@ -634,11 +634,14 @@ class Bot(irc.IRCClient):
             privilege_chars = {'@', '+', '%', '&', '~'}
             privileges = ''.join(sorted(c for c in wstatus if c in privilege_chars))
 
-            key = (wnickname, whost)
-            if key in self.user_cache:
-                userId = self.user_cache.get_valid(key)
-            else:
-                info = self.sql.sqlite_handle(self.botId, wnickname, host)
+            # --- SAFE TTLCache access ---
+            if not isinstance(self.user_cache, TTLCache):
+                self.user_cache = TTLCache(maxlen=2000, ttl=6 * 3600)
+
+            key = (wnickname, whost)  # cache key: (nick, host-only)
+            userId = self.user_cache.get_valid(key)
+            if userId is None:
+                info = self.sql.sqlite_handle(self.botId, wnickname, host)  # host = nick!ident@host
                 userId = info[0] if info else None
                 self.user_cache.set(key, userId)
 
@@ -651,7 +654,7 @@ class Bot(irc.IRCClient):
             if wnickname == s.nickname:
                 return
 
-            # 3) login clasic + atașează TOATE nick-urile văzute pe același host
+            # 3) classic login + attach ALL nicks seen on the same host
             if userId and not self.is_logged_in(userId, lhost):
                 stored_hash = self.sql.sqlite_get_user_password(userId)
                 if not stored_hash:
@@ -666,22 +669,20 @@ class Bot(irc.IRCClient):
                 if lhost not in self.logged_in_users[userId]["hosts"]:
                     self.logged_in_users[userId]["hosts"].append(lhost)
 
-                # atașează toate nick-urile de pe host (inclusiv actualul)
                 nicks_on_host = self.host_to_nicks.get(lhost, set()) or {wnickname}
                 self.logged_in_users[userId]["nicks"].update(nicks_on_host)
-
-                # păstrează ultimul nick văzut live
                 self.logged_in_users[userId]["nick"] = wnickname
 
                 if not self.thread_check_logged_users_started:
-                    self.thread_check_logged_users = ThreadWorker(target=self._check_logged_users_loop,
-                                                                  name="logged_users")
+                    self.thread_check_logged_users = ThreadWorker(
+                        target=self._check_logged_users_loop, name="logged_users"
+                    )
                     self.thread_check_logged_users.daemon = True
                     self.thread_check_logged_users.start()
                     self.thread_check_logged_users_started = True
 
             else:
-                # 4) dacă e deja logat pe host-ul ăsta, doar adaugă nick-ul în set
+                # 4) already logged on this host? just add the nick to the set
                 if userId and self.is_logged_in(userId, lhost):
                     self.logged_in_users[userId].setdefault("nicks", set()).add(wnickname)
 
