@@ -252,6 +252,20 @@ class Bot(irc.IRCClient):
         self._hb_thread.daemon = True
         self._hb_thread.start()
 
+    def _get_ident_host_from_channel(self, channel: str, nick: str):
+        for c, n, ident, host, *_ in self.channel_details:
+            if c == channel and n == nick:
+                return ident, host
+        return None, None
+
+    def _get_any_ident_host(self, nick: str):
+        for c, n, ident, host, *_ in self.channel_details:
+            if n == nick:
+                return ident, host
+        return None, None
+
+    def _remove_user_from_channel(self, channel: str, nick: str):
+        self.channel_details = [row for row in self.channel_details if not (row[0] == channel and row[1] == nick)]
 
     def userQuit(self, user, message):
         if self.channel_details:
@@ -261,7 +275,8 @@ class Bot(irc.IRCClient):
         # logout on quit
         self.logoutOnQuit(user)
         nick = user.split('!')[0]
-        seen.on_quit(self.sql, self.botId, nick, message)
+        ident, host = self._get_any_ident_host(nick)
+        seen.on_quit(self.sql, self.botId, nick, message, ident=ident, host=host)
 
     def signedOn(self):
         print("Signed on to the server")
@@ -307,21 +322,21 @@ class Bot(irc.IRCClient):
     def userJoined(self, user, channel):
         if self.channel_details:
             self.sendLine(f"WHO {user}")
-        nick = user.split('!')[0]
+
         ident = user.split('!')[1].split('@')[0] if '!' in user and '@' in user else ''
         host = user.split('@')[1] if '@' in user else ''
-        seen.on_join(self.sql, self.botId, channel, nick, ident, host)
+        seen.on_join(self.sql, self.botId, channel, user, ident, host)
 
     def userLeft(self, user, channel):
-        if self.channel_details:
-            self.channel_details = [arr for arr in self.channel_details if not (channel in arr and user in arr)]
         nick = user.split('!')[0]
-        seen.on_part(self.sql, self.botId, channel, nick, reason="left")
+        ident, host = self._get_ident_host_from_channel(channel, nick)
+        seen.on_part(self.sql, self.botId, channel, nick, ident=ident, host=host, reason="left")
+        self._remove_user_from_channel(channel, nick)
 
     def userKicked(self, kicked, channel, kicker, message):
-        if self.channel_details:
-            self.channel_details = [arr for arr in self.channel_details if not (channel in arr and kicked in arr)]
-        seen.on_kick(self.sql, self.botId, channel, kicked, kicker, message)
+        ident, host = self._get_ident_host_from_channel(channel, kicked)
+        seen.on_kick(self.sql, self.botId, channel, kicked, kicker, message, ident=ident, host=host)
+        self._remove_user_from_channel(channel, kicked)
 
     def kickedFrom(self, channel, kicker, message):
         if channel not in self.notOnChannels:
