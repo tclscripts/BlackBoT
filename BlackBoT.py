@@ -252,7 +252,12 @@ class Bot(irc.IRCClient):
         self._hb_thread.daemon = True
         self._hb_thread.start()
 
+
     def userQuit(self, user, message):
+        if self.channel_details:
+            self.channel_details = [
+                arr for arr in self.channel_details if arr[1].lower() != user.lower()
+            ]
         # logout on quit
         self.logoutOnQuit(user)
         nick = user.split('!')[0]
