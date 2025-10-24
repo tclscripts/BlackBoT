@@ -124,7 +124,7 @@ def update_from_github(self, feedback):
     if not remote_version:
         logger.warning("Remote VERSION not available, aborting update.")
         return
-    if remote_version <= local_version:
+    if remote_version == local_version:
         logger.info(f"Already up to date: {local_version}")
         return
 
