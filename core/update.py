@@ -50,47 +50,106 @@ def fetch_remote_version():
     return None
 
 def parse_settings(file_path):
-    settings = {}
+
     if not os.path.exists(file_path):
-        return settings
-    with open(file_path, "r") as f:
-        for line in f:
-            match = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+)", line)
-            if match:
-                var, value = match.groups()
-                settings[var] = value.strip()
-    return settings
+        return {}
 
-def merge_settings(old_settings, new_settings_content):
-    merged = []
-    seen_vars = set()
+    settings = {}
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
 
-    for line in new_settings_content.splitlines():
-        stripped = line.strip()
-
-        if not stripped or stripped.startswith("#"):
-            merged.append(line)
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # ignoră linii goale / comentarii pure
+        if not line.strip() or line.lstrip().startswith("#"):
+            i += 1
             continue
 
-        match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+)", line)
-        if match:
-            var, new_value = match.groups()
-            seen_vars.add(var)
+        m = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.*)$", line)
+        if not m:
+            i += 1
+            continue
 
-            if var in old_settings:
-                comment_split = line.split("#", 1)
-                comment = f" # {comment_split[1].strip()}" if len(comment_split) > 1 else ""
-                merged.append(f"{var} = {old_settings[var]}{comment}")
-            else:
-                merged.append(line)
-        else:
-            merged.append(line)
+        var, rhs = m.groups()
+        collected = [rhs.rstrip("\n")]
 
-    for var in old_settings:
-        if var not in seen_vars:
-            merged.append(f"{var} = {old_settings[var]}")
+        open_brackets = sum(rhs.count(ch) for ch in "([{")
+        close_brackets = sum(rhs.count(ch) for ch in ")]}")
+        while (open_brackets > close_brackets) and (i + 1 < len(lines)):
+            i += 1
+            nxt = lines[i].rstrip("\n")
+            collected.append(nxt)
+            open_brackets += sum(nxt.count(ch) for ch in "([{")
+            close_brackets += sum(nxt.count(ch) for ch in ")]}")
 
-    return "\n".join(merged)
+        value_text = "\n".join(collected).rstrip()
+        settings[var] = value_text
+        i += 1
+
+    return settings
+
+
+def merge_settings(old_settings, new_settings_content):
+
+    out_lines = []
+    lines = new_settings_content.splitlines()
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        m = re.match(r"^(\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*=\s*)(.*)$", line)
+        if not m:
+            out_lines.append(line)
+            i += 1
+            continue
+
+        indent, var, eq, rhs = m.groups()
+
+        if var not in old_settings:
+            # valoare din noul fișier rămâne așa cum e; însă dacă e multi-linie, sărim peste blocul ei
+            out_lines.append(line)
+            # consumă blocul multi-linie din noul fișier ca să nu dublăm linii
+            open_b = sum(rhs.count(ch) for ch in "([{")
+            close_b = sum(rhs.count(ch) for ch in ")]}")
+            while (open_b > close_b) and (i + 1 < len(lines)):
+                i += 1
+                nxt = lines[i]
+                out_lines.append(nxt)
+                open_b += sum(nxt.count(ch) for ch in "([{")
+                close_b += sum(nxt.count(ch) for ch in ")]}")
+            i += 1
+            continue
+
+        comment = ""
+        if "#" in rhs:
+
+            comment = "  " + rhs[rhs.index("#"):].rstrip()
+        old_value_text = old_settings[var].rstrip()
+
+        old_value_lines = old_value_text.splitlines() or [old_value_text]
+        if old_value_lines:
+            first = old_value_lines[0].rstrip()
+            out_lines.append(f"{indent}{var}{eq}{first}{comment}")
+            for cont in old_value_lines[1:]:
+                out_lines.append(cont.rstrip())
+
+        open_b = sum(rhs.count(ch) for ch in "([{")
+        close_b = sum(rhs.count(ch) for ch in ")]}")
+        while (open_b > close_b) and (i + 1 < len(lines)):
+            i += 1
+            nxt = lines[i]
+            open_b += sum(nxt.count(ch) for ch in "([{")
+            close_b += sum(nxt.count(ch) for ch in ")]}")
+        i += 1
+
+    present_vars = set(re.findall(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=", new_settings_content, flags=re.M))
+    for var, value_text in old_settings.items():
+        if var not in present_vars:
+            out_lines.append(f"{var} = {value_text}")
+
+    return "\n".join(out_lines) + "\n"
 
 def _choose_extracted_root(tmpdir: Path) -> Path:
     for entry in tmpdir.iterdir():
