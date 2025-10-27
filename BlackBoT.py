@@ -398,6 +398,7 @@ class Bot(irc.IRCClient):
     def _join_channels(self):
         if self.newbot[0] == 0:
             for channel in s.channels:
+                channel = channel.lower()
                 self.join(channel)
                 self.channels.append(channel)
                 self.sql.sqlite3_addchan(channel, self.username, self.botId)
@@ -755,6 +756,7 @@ class Bot(irc.IRCClient):
 
     # attempt rejoin
     def _attempt_rejoin(self, channel):
+        channel = channel.lower()
         if channel not in self.rejoin_pending:
             return
 
