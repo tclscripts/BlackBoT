@@ -389,7 +389,7 @@ def cmd_channels(self, channel, feedback, nick, host, msg):
 
         if self.sql.sqlite_is_channel_suspended(chan):
             flags.append("🔒suspended")
-        elif chan not in self.channels:
+        elif chan.lower() in (c.lower() for c in self.channels):
             flags.append("❌offline")
         elif not self.user_is_op(self.nickname, chan):
             flags.append("⚠️no-op")
@@ -435,7 +435,7 @@ def cmd_delchan(self, channel, feedback, nick, host, msg):
     checkIfValid = sql_instance.sqlite_validchan(channel)
     if checkIfValid:
         self.part(channel)  # part channel.
-        if channel in self.channels:
+        if channel.lower() in (c.lower() for c in self.channels):
             self.channels.remove(channel)
         if channel in self.notOnChannels:
             self.notOnChannels.remove(channel)

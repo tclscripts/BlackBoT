@@ -335,7 +335,7 @@ class Bot(irc.IRCClient):
 
 
     def joined(self, channel):
-        if self.notOnChannels and channel in self.notOnChannels:
+        if self.notOnChannels and channel.lower() in (c.lower() for c in self.notOnChannels):
             self.notOnChannels.remove(channel)
 
         print(f"Joined channel {channel}")
@@ -374,7 +374,7 @@ class Bot(irc.IRCClient):
 
     def kickedFrom(self, channel, kicker, message):
         
-        if channel not in self.notOnChannels:
+        if channel.lower() in (c.lower() for c in self.notOnChannels):
             self.notOnChannels.append(channel)
         self.channel_details = [arr for arr in self.channel_details if channel in arr]
         self.addChannelToPendingList(channel, f"kicked by {kicker} with reason: {message}")
@@ -617,28 +617,28 @@ class Bot(irc.IRCClient):
 
     def irc_ERR_BANNEDFROMCHAN(self, prefix, params):
         print(f"Error: Banned from channel {params[1]}")
-        if params[1] not in self.notOnChannels:
+        if params[1].lower() in (c.lower() for c in self.notOnChannels):
             self.notOnChannels.append(params[1])
             self.addChannelToPendingList(params[1], f"banned on {params[1]}")
         self._schedule_rejoin(params[1])
 
     def irc_ERR_CHANNELISFULL(self, prefix, params):
         print(f"Error: Channel {params[1]} is full")
-        if params[1] not in self.notOnChannels:
+        if params[1].lower() in (c.lower() for c in self.notOnChannels):
             self.notOnChannels.append(params[1])
             self.addChannelToPendingList(params[1], f"{params[1]} is full, cannot join")
         self._schedule_rejoin(params[1])
 
     def irc_ERR_BADCHANNELKEY(self, prefix, params):
         print(f"Error: Bad channel key for {params[1]}")
-        if params[1] not in self.notOnChannels:
+        if params[1].lower() in (c.lower() for c in self.notOnChannels):
             self.notOnChannels.append(params[1])
             self.addChannelToPendingList(params[1], f"invalid channel key (+k) for {params[1]}")
         self._schedule_rejoin(params[1])
 
     def irc_ERR_INVITEONLYCHAN(self, prefix, params):
         print(f"Error: Invite-only channel {params[1]}")
-        if params[1] not in self.notOnChannels:
+        if params[1].lower() in (c.lower() for c in self.notOnChannels):
             self.notOnChannels.append(params[1])
             self.addChannelToPendingList(params[1], f"invite only on {params[1]}")
         self._schedule_rejoin(params[1])
