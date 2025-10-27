@@ -265,7 +265,7 @@ class Bot(irc.IRCClient):
         return None, None
 
     def _remove_user_from_channel(self, channel: str, nick: str):
-        channel = channel.lower()
+        
         nick = nick.lower()
         self.channel_details = [
             row for row in self.channel_details
@@ -315,7 +315,7 @@ class Bot(irc.IRCClient):
         super().lineReceived(line)
 
     def joined(self, channel):
-        channel = channel.lower()
+        
         if self.notOnChannels:
             if channel in self.notOnChannels:
                 self.notOnChannels.remove(channel)
@@ -326,7 +326,7 @@ class Bot(irc.IRCClient):
         self.sendLine(f"WHO {channel}")
 
     def userJoined(self, user, channel):
-        channel = channel.lower()
+        
         if self.channel_details:
             self.sendLine(f"WHO {user}")
 
@@ -335,20 +335,20 @@ class Bot(irc.IRCClient):
         seen.on_join(self.sql, self.botId, channel, user, ident, host)
 
     def userLeft(self, user, channel):
-        channel = channel.lower()
+        
         nick = user.split('!')[0]
         ident, host = self._get_ident_host_from_channel(channel, nick)
         seen.on_part(self.sql, self.botId, channel, nick, ident=ident, host=host, reason="left")
         self._remove_user_from_channel(channel, nick)
 
     def userKicked(self, kicked, channel, kicker, message):
-        channel = channel.lower()
+        
         ident, host = self._get_ident_host_from_channel(channel, kicked)
         seen.on_kick(self.sql, self.botId, channel, kicked, kicker, message, ident=ident, host=host)
         self._remove_user_from_channel(channel, kicked)
 
     def kickedFrom(self, channel, kicker, message):
-        channel = channel.lower()
+        
         if channel not in self.notOnChannels:
             self.notOnChannels.append(channel)
         self.channel_details = [arr for arr in self.channel_details if channel in arr]
@@ -385,7 +385,7 @@ class Bot(irc.IRCClient):
 
     # add channel to pending list
     def addChannelToPendingList(self, channel, reason):
-        channel = channel.lower()
+        
         if channel in self.rejoin_pending:
             return
         self.rejoin_pending[channel] = {
@@ -398,7 +398,7 @@ class Bot(irc.IRCClient):
     def _join_channels(self):
         if self.newbot[0] == 0:
             for channel in s.channels:
-                channel = channel.lower()
+                
                 self.join(channel)
                 self.channels.append(channel)
                 self.sql.sqlite3_addchan(channel, self.username, self.botId)
@@ -573,7 +573,7 @@ class Bot(irc.IRCClient):
         return None
 
     def modeChanged(self, user, channel, set, modes, args):
-        channel = channel.lower()
+        
         sign = "+" if set else "-"
         if channel not in self.channels:
             return
@@ -594,51 +594,44 @@ class Bot(irc.IRCClient):
 
     def irc_ERR_BANNEDFROMCHAN(self, prefix, params):
         print(f"Error: Banned from channel {params[1]}")
-        channel = params[1].lower()
-        if channel not in self.notOnChannels:
-            self.notOnChannels.append(channel)
-            self.addChannelToPendingList(channel, f"banned on {channel}")
-        self._schedule_rejoin(channel)
+        if params[1] not in self.notOnChannels:
+            self.notOnChannels.append(params[1])
+            self.addChannelToPendingList(params[1], f"banned on {params[1]}")
+        self._schedule_rejoin(params[1])
 
     def irc_ERR_CHANNELISFULL(self, prefix, params):
-        channel = params[1].lower()
-        print(f"Error: Channel {channel} is full")
-        if channel not in self.notOnChannels:
-            self.notOnChannels.append(channel)
-            self.addChannelToPendingList(channel, f"{channel} is full, cannot join")
-        self._schedule_rejoin(channel)
+        print(f"Error: Channel {params[1]} is full")
+        if params[1] not in self.notOnChannels:
+            self.notOnChannels.append(params[1])
+            self.addChannelToPendingList(params[1], f"{params[1]} is full, cannot join")
+        self._schedule_rejoin(params[1])
 
     def irc_ERR_BADCHANNELKEY(self, prefix, params):
-        channel = params[1].lower()
-        print(f"Error: Bad channel key for {channel}")
-        if channel not in self.notOnChannels:
-            self.notOnChannels.append(channel)
-            self.addChannelToPendingList(channel, f"invalid channel key (+k) for {channel}")
-        self._schedule_rejoin(channel)
+        print(f"Error: Bad channel key for {params[1]}")
+        if params[1] not in self.notOnChannels:
+            self.notOnChannels.append(params[1])
+            self.addChannelToPendingList(params[1], f"invalid channel key (+k) for {params[1]}")
+        self._schedule_rejoin(params[1])
 
     def irc_ERR_INVITEONLYCHAN(self, prefix, params):
-        channel = params[1].lower()
-        print(f"Error: Invite-only channel {channel}")
-        if channel not in self.notOnChannels:
-            self.notOnChannels.append(channel)
-            self.addChannelToPendingList(channel, f"invite only on {channel}")
-        self._schedule_rejoin(channel)
+        print(f"Error: Invite-only channel {params[1]}")
+        if params[1] not in self.notOnChannels:
+            self.notOnChannels.append(params[1])
+            self.addChannelToPendingList(params[1], f"invite only on {params[1]}")
+        self._schedule_rejoin(params[1])
 
     def irc_ERR_NOSUCHCHANNEL(self, prefix, params):
-        channel = params[1].lower()
-        print(f"Error: No such channel {channel}")
+        print(f"Error: No such channel {params[1]}")
 
     def irc_ERR_CANNOTSENDTOCHAN(self, prefix, params):
-        channel = params[1].lower()
-        print(f"Error: Cannot send to channel {channel}")
+        print(f"Error: Cannot send to channel {params[1]}")
 
     def irc_INVITE(self, prefix, params):
-        channel = params[1].lower()
         inviter = prefix.split('!')[0]
-        print(f"Received invitation from {inviter} to join {channel}")
-        if channel in self.channels:
-            if channel in self.notOnChannels:
-                self.join(channel)
+        print(f"Received invitation from {inviter} to join {params[1]}")
+        if params[1] in self.channels:
+            if params[1] in self.notOnChannels:
+                self.join(params[1])
 
     def irc_unknown(self, prefix, command, params):
         if command == 'PONG':
@@ -756,7 +749,6 @@ class Bot(irc.IRCClient):
 
     # attempt rejoin
     def _attempt_rejoin(self, channel):
-        channel = channel.lower()
         if channel not in self.rejoin_pending:
             return
 

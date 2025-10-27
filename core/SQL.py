@@ -240,12 +240,9 @@ class SQL:
     ##
     # check if valid channel
     def sqlite_validchan(self, channel):
-        query = "SELECT id from CHANNELS where channelName = '{}'".format(channel)
-        check = self.sqlite_select(query)
-        if check:
-            return True
-        else:
-            return False
+        query = "SELECT id FROM CHANNELS WHERE channelName = ? COLLATE NOCASE"
+        check = self.sqlite_select(query, (channel,))
+        return bool(check)
 
     # auto suspend SQL procedure
     def sqlite_auto_suspend_channel(self, channel, reason):
@@ -398,7 +395,7 @@ class SQL:
                 SELECT 1 FROM CHANNELACCESS ca
                 JOIN VALIDACCESS va ON ca.accessId = va.accessId
                 JOIN CHANNELS ch ON ca.channelId = ch.id
-                WHERE ca.botId = ? AND ca.userId = ? AND ch.channelName = ? AND va.accessFlag IN ({placeholders})
+                WHERE ca.botId = ? AND ca.userId = ? AND ch.channelName = ? COLLATE NOCASE AND va.accessFlag IN ({placeholders})
                 LIMIT 1
             """
             params = [botId, userId, channel] + flags_list
