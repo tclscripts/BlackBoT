@@ -514,7 +514,7 @@ def cmd_cycle(self, channel, feedback, nick, host, msg):
     sql_instance = result['sql']
     checkIfValid = sql_instance.sqlite_validchan(channel)
     if checkIfValid:
-        if channel in self.channels:
+        if channel.lower() in (c.lower() for c in self.channels):
             self.part(channel, "Be back in 3 seconds")
             self.addChannelToPendingList(channel, f'cycle command by {nick}')
             self._schedule_rejoin(channel)
