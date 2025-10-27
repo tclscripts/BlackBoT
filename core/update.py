@@ -249,9 +249,9 @@ def update_from_github(self, feedback):
 
             with open(project_root / VERSION_FILE, "w", encoding="utf-8") as f:
                 f.write(remote_version)
-            logger.info("Update complete, restarting bot in 2s…")
-            reactor.callLater(2, self.restart, "✨ Updating... Be right back with fresh powers!")
-
+            logger.info("Update complete, restarting now…")
+            from twisted.internet import reactor
+            reactor.callFromThread(lambda: reactor.callLater(2, self.restart, "✨ Updating... Be right back with fresh powers!"))
     except Exception as e:
         import traceback
         logger.error(f"Update failed: {e}\n{traceback.format_exc()}")

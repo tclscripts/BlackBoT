@@ -2,6 +2,18 @@
 import time
 from typing import Optional, Tuple, List
 
+def format_seen_stats(sql, botId: int, channel_hint: str | None = None) -> str:
+    total = sql.sqlite_select("SELECT COUNT(*) FROM SEEN WHERE botId=?", (botId,))[0][0]
+    uniq_n = sql.sqlite_select("SELECT COUNT(DISTINCT LOWER(nick)) FROM SEEN WHERE botId=?", (botId,))[0][0]
+    uniq_h = sql.sqlite_select("SELECT COUNT(DISTINCT LOWER(ident||'@'||host)) FROM SEEN WHERE botId=?", (botId,))[0][0]
+    msg = [f"🌍 Global: {total} records, {uniq_n} nicks, {uniq_h} hosts"]
+    if channel_hint and channel_hint.startswith("#"):
+        c_tot = sql.sqlite_select("SELECT COUNT(*) FROM SEEN WHERE botId=? AND channel=?", (botId, channel_hint))[0][0]
+        c_n = sql.sqlite_select("SELECT COUNT(DISTINCT LOWER(nick)) FROM SEEN WHERE botId=? AND channel=?", (botId, channel_hint))[0][0]
+        c_h = sql.sqlite_select("SELECT COUNT(DISTINCT LOWER(ident||'@'||host)) FROM SEEN WHERE botId=? AND channel=?", (botId, channel_hint))[0][0]
+        msg.append(f"{channel_hint}: {c_tot} records, {c_n} nicks, {c_h} hosts")
+    return " | ".join(msg)
+
 # ---------- small helpers ----------
 
 def _human_ago(seconds: int) -> str:

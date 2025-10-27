@@ -130,25 +130,9 @@ def cmd_update(self, channel, feedback, nick, host, msg):
 
     elif arg == "start":
         self.send_message(feedback, "🔁 Starting update ..")
-
-        def _run_update_threadsafe():
-            # Marshal send_message calls back into the Twisted reactor thread
-            original_send = self.send_message
-            def safe_send(target, text):
-                reactor.callFromThread(original_send, target, text)
-            try:
-                self.send_message = safe_send
-                update.update_from_github(self, feedback)
-            finally:
-                self.send_message = original_send
-
-        self.thread_auto_update = ThreadWorker(target=_run_update_threadsafe, name="auto_update")
-        self.thread_auto_update.daemon = True
-        self.thread_auto_update.start()
-
+        ThreadWorker(target=lambda: update.update_from_github(self, feedback), name="manual_update").start()
     else:
         self.send_message(feedback, f"⚠️ Usage: {s.char}update check | {s.char}update start")
-
 
 
 def cmd_auth(self, channel, feedback, nick, host, msg):
@@ -837,7 +821,11 @@ def cmd_seen(self, channel, feedback, nick, host, msg):
         self.send_message(feedback, f"Usage: {s.char}seen <nick|host|pattern>")
         return
 
-    # Folosește canalul curent ca hint doar dacă e un canal (#...)
+    if (msg or "").strip().lower() == "-stats":
+        ch = channel if channel.startswith("#") else None
+        self.send_message(feedback, seen.format_seen_stats(self.sql, self.botId, ch))
+        return
+
     channel_hint = channel if channel.startswith("#") else None
 
     # Pasează bot=self ca să poată verifica live dacă userul e pe canal chiar dacă nu are rând în SEEN
