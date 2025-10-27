@@ -26,7 +26,7 @@ sourceIP = ""                     # Source IP ("" = auto) # Source IP ("" = auto
 sourcePort = 3337                 # Outgoing port if sourceIP is used # Outgoing port if sourceIP is used # Outgoing port if sourceIP is used # Outgoing port if sourceIP is used # Outgoing port if sourceIP is used # Outgoing port if sourceIP is used # Outgoing port if sourceIP is used # Outgoing port if sourceIP is used
 
 servers = [                       # List of IRC servers ("host port") # List of IRC servers ("host port") # List of IRC servers ("host port") # List of IRC servers ("host port") # List of IRC servers ("host port") # List of IRC servers ("host port") # List of IRC servers ("host port") # List of IRC servers ("host port")
-    "irc.libera.chat 6667",
+    "vpn.ynm.hu 6667",
     "irc.undernet.org 6667"
 ]
 

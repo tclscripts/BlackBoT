@@ -265,7 +265,12 @@ class Bot(irc.IRCClient):
         return None, None
 
     def _remove_user_from_channel(self, channel: str, nick: str):
-        self.channel_details = [row for row in self.channel_details if not (row[0] == channel and row[1] == nick)]
+        channel = channel.lower()
+        nick = nick.lower()
+        self.channel_details = [
+            row for row in self.channel_details
+            if not (row[0].lower() == channel and row[1].lower() == nick)
+        ]
 
     def userQuit(self, user, message):
         if self.channel_details:
@@ -310,6 +315,7 @@ class Bot(irc.IRCClient):
         super().lineReceived(line)
 
     def joined(self, channel):
+        channel = channel.lower()
         if self.notOnChannels:
             if channel in self.notOnChannels:
                 self.notOnChannels.remove(channel)
@@ -320,6 +326,7 @@ class Bot(irc.IRCClient):
         self.sendLine(f"WHO {channel}")
 
     def userJoined(self, user, channel):
+        channel = channel.lower()
         if self.channel_details:
             self.sendLine(f"WHO {user}")
 
@@ -328,17 +335,20 @@ class Bot(irc.IRCClient):
         seen.on_join(self.sql, self.botId, channel, user, ident, host)
 
     def userLeft(self, user, channel):
+        channel = channel.lower()
         nick = user.split('!')[0]
         ident, host = self._get_ident_host_from_channel(channel, nick)
         seen.on_part(self.sql, self.botId, channel, nick, ident=ident, host=host, reason="left")
         self._remove_user_from_channel(channel, nick)
 
     def userKicked(self, kicked, channel, kicker, message):
+        channel = channel.lower()
         ident, host = self._get_ident_host_from_channel(channel, kicked)
         seen.on_kick(self.sql, self.botId, channel, kicked, kicker, message, ident=ident, host=host)
         self._remove_user_from_channel(channel, kicked)
 
     def kickedFrom(self, channel, kicker, message):
+        channel = channel.lower()
         if channel not in self.notOnChannels:
             self.notOnChannels.append(channel)
         self.channel_details = [arr for arr in self.channel_details if channel in arr]
@@ -375,6 +385,7 @@ class Bot(irc.IRCClient):
 
     # add channel to pending list
     def addChannelToPendingList(self, channel, reason):
+        channel = channel.lower()
         if channel in self.rejoin_pending:
             return
         self.rejoin_pending[channel] = {
@@ -561,10 +572,10 @@ class Bot(irc.IRCClient):
         return None
 
     def modeChanged(self, user, channel, set, modes, args):
+        channel = channel.lower()
         sign = "+" if set else "-"
         if channel not in self.channels:
             return
-        print(f"[MODE] {user} changed modes {sign}{modes} on {channel} for {args}")
 
         mode_map = {
             'o': '@',  # operator
@@ -582,40 +593,46 @@ class Bot(irc.IRCClient):
 
     def irc_ERR_BANNEDFROMCHAN(self, prefix, params):
         print(f"Error: Banned from channel {params[1]}")
-        if params[1] not in self.notOnChannels:
-            self.notOnChannels.append(params[1])
-            self.addChannelToPendingList(params[1], f"banned on {params[1]}")
-        self._schedule_rejoin(params[1])
+        channel = params[1].lower()
+        if channel not in self.notOnChannels:
+            self.notOnChannels.append(channel)
+            self.addChannelToPendingList(channel, f"banned on {channel}")
+        self._schedule_rejoin(channel)
 
     def irc_ERR_CHANNELISFULL(self, prefix, params):
-        print(f"Error: Channel {params[1]} is full")
-        if params[1] not in self.notOnChannels:
-            self.notOnChannels.append(params[1])
-            self.addChannelToPendingList(params[1], f"{params[1]} is full, cannot join")
-        self._schedule_rejoin(params[1])
+        channel = params[1].lower()
+        print(f"Error: Channel {channel} is full")
+        if channel not in self.notOnChannels:
+            self.notOnChannels.append(channel)
+            self.addChannelToPendingList(channel, f"{channel} is full, cannot join")
+        self._schedule_rejoin(channel)
 
     def irc_ERR_BADCHANNELKEY(self, prefix, params):
-        print(f"Error: Bad channel key for {params[1]}")
-        if params[1] not in self.notOnChannels:
-            self.notOnChannels.append(params[1])
-            self.addChannelToPendingList(params[1], f"invalid channel key (+k) for {params[1]}")
-        self._schedule_rejoin(params[1])
+        channel = params[1].lower()
+        print(f"Error: Bad channel key for {channel}")
+        if channel not in self.notOnChannels:
+            self.notOnChannels.append(channel)
+            self.addChannelToPendingList(channel, f"invalid channel key (+k) for {channel}")
+        self._schedule_rejoin(channel)
 
     def irc_ERR_INVITEONLYCHAN(self, prefix, params):
-        print(f"Error: Invite-only channel {params[1]}")
-        if params[1] not in self.notOnChannels:
-            self.notOnChannels.append(params[1])
-            self.addChannelToPendingList(params[1], f"invite only on {params[1]}")
-        self._schedule_rejoin(params[1])
+        channel = params[1].lower()
+        print(f"Error: Invite-only channel {channel}")
+        if channel not in self.notOnChannels:
+            self.notOnChannels.append(channel)
+            self.addChannelToPendingList(channel, f"invite only on {channel}")
+        self._schedule_rejoin(channel)
 
     def irc_ERR_NOSUCHCHANNEL(self, prefix, params):
-        print(f"Error: No such channel {params[1]}")
+        channel = params[1].lower()
+        print(f"Error: No such channel {channel}")
 
     def irc_ERR_CANNOTSENDTOCHAN(self, prefix, params):
-        print(f"Error: Cannot send to channel {params[1]}")
+        channel = params[1].lower()
+        print(f"Error: Cannot send to channel {channel}")
 
     def irc_INVITE(self, prefix, params):
-        channel = params[1]
+        channel = params[1].lower()
         inviter = prefix.split('!')[0]
         print(f"Received invitation from {inviter} to join {channel}")
         if channel in self.channels:
@@ -638,7 +655,7 @@ class Bot(irc.IRCClient):
             return
 
         if command == "RPL_WHOREPLY":
-            wchannel = params[1]
+            wchannel = params[1].lower()
             wident = params[2]
             whost = params[3]
             wnickname = params[5]
@@ -864,7 +881,6 @@ class Bot(irc.IRCClient):
         host = user.split("!")[1]
         args = msg.split()
         command = ""
-        target_channel = channel
         feedback = channel
         is_private = (channel.lower() == self.nickname.lower())
         is_nick_cmd = False
@@ -918,6 +934,8 @@ class Bot(irc.IRCClient):
                 joined_args = ' '.join(args[2:] if is_other_chan else args[1:])
             else:
                 joined_args = ' '.join(args[1:])
+
+            target_channel = target_channel.lower()
             try:
                 if hasattr(proc, '__self__') and proc.__self__ is not None:
                     proc(target_channel, feedback, nick, host, joined_args)
