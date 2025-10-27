@@ -655,7 +655,7 @@ class Bot(irc.IRCClient):
             return
 
         if command == "RPL_WHOREPLY":
-            wchannel = params[1].lower()
+            wchannel = params[1]
             wident = params[2]
             whost = params[3]
             wnickname = params[5]
@@ -882,6 +882,7 @@ class Bot(irc.IRCClient):
         args = msg.split()
         command = ""
         feedback = channel
+        target_channel = channel
         is_private = (channel.lower() == self.nickname.lower())
         is_nick_cmd = False
         is_other_chan = False
@@ -935,7 +936,6 @@ class Bot(irc.IRCClient):
             else:
                 joined_args = ' '.join(args[1:])
 
-            target_channel = target_channel.lower()
             try:
                 if hasattr(proc, '__self__') and proc.__self__ is not None:
                     proc(target_channel, feedback, nick, host, joined_args)
