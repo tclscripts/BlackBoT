@@ -421,7 +421,7 @@ def cmd_addchan(self, channel, feedback, nick, host, msg):
     if checkIfValid:
         self.send_message(feedback, "The channel '{}' is already added".format(channel))
     else:
-        self.join(channel)  # join channel.
+        self.join_channel(channel)  # join channel.
         self.channels.append(channel)
         sql_instance.sqlite3_addchan(channel, nick, self.botId)
         self.send_message(feedback, "Added channel '{}' in my database".format(channel))

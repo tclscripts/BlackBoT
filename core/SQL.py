@@ -202,6 +202,19 @@ class SQL:
                 self.sqlite3_insert(query, (setting['name'], setting['type'], setting['description']))
             return [0, last_row_id]
 
+    def sqlite_channel_exists_exact(self, botId, channel: str) -> bool:
+        q = "SELECT 1 FROM CHANNELS WHERE botId = ? AND channelName = ? LIMIT 1"
+        return bool(self.sqlite_select(q, (botId, channel)))
+
+    def sqlite_find_channel_case_insensitive(self, botId, channel: str):
+        q = "SELECT channelName FROM CHANNELS WHERE botId = ? AND channelName = ? COLLATE NOCASE LIMIT 1"
+        rows = self.sqlite_select(q, (botId, channel))
+        return rows[0][0] if rows else None
+
+    def sqlite_update_channel_name(self, botId, old_name: str, new_name: str):
+        q = "UPDATE CHANNELS SET channelName = ?, lastChangedTime = ? WHERE botId = ? AND channelName = ? COLLATE NOCASE"
+        self.sqlite3_update(q, (new_name, time.time(), botId, old_name))
+
     ##
     # add channel to database
     def sqlite3_addchan(self, channel, user, botId):

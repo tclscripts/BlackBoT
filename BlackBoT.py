@@ -113,6 +113,7 @@ class Bot(irc.IRCClient):
         self.notOnChannels = []
         # rejoin channel list
         self.rejoin_pending = {}
+        self.pending_join_requests = {}
         # logged users
         self.logged_in_users = {}
         self.clean_logged_users(silent=True)
@@ -272,6 +273,12 @@ class Bot(irc.IRCClient):
             if not (row[0].lower() == channel and row[1].lower() == nick)
         ]
 
+    def join_channel(self, name: str):
+        if not name:
+            return
+        self.pending_join_requests[name.lower()] = name
+        self.join(name)
+
     def userQuit(self, user, message):
         if self.channel_details:
             self.channel_details = [
@@ -314,15 +321,33 @@ class Bot(irc.IRCClient):
             return
         super().lineReceived(line)
 
+    def _ensure_channel_canonical_in_db(self, requested_name: str, canonical_name: str):
+
+        if self.sql.sqlite_channel_exists_exact(self.botId, canonical_name):
+            return
+
+        old = self.sql.sqlite_find_channel_case_insensitive(self.botId, canonical_name)
+        if old and old != canonical_name:
+            self.sql.sqlite_update_channel_name(self.botId, old, canonical_name)
+            return
+
+        self.sql.sqlite3_addchan(canonical_name, self.username, self.botId)
+
+
     def joined(self, channel):
-        
-        if self.notOnChannels:
-            if channel in self.notOnChannels:
-                self.notOnChannels.remove(channel)
+        if self.notOnChannels and channel in self.notOnChannels:
+            self.notOnChannels.remove(channel)
+
         print(f"Joined channel {channel}")
-        # remove channel from rejoin_pending list
+
         if channel in self.rejoin_pending:
             del self.rejoin_pending[channel]
+        try:
+            requested = self.pending_join_requests.pop(channel.lower(), None)
+            self._ensure_channel_canonical_in_db(requested_name=requested, canonical_name=channel)
+        except Exception as e:
+            print(f"[WARN] DB sync on join failed for {channel}: {e}")
+
         self.sendLine(f"WHO {channel}")
 
     def userJoined(self, user, channel):
@@ -398,15 +423,13 @@ class Bot(irc.IRCClient):
     def _join_channels(self):
         if self.newbot[0] == 0:
             for channel in s.channels:
-                
-                self.join(channel)
+                self.join_channel(channel)
                 self.channels.append(channel)
-                self.sql.sqlite3_addchan(channel, self.username, self.botId)
         else:
             stored_channels = self.sql.sqlite3_channels(self.botId)
             for channel in stored_channels:
                 if not self.sql.sqlite_is_channel_suspended(channel[0]):
-                    self.join(channel[0])
+                    self.join_channel(channel[0])
                     self.channels.append(channel[0])
                     print(f"Joining {channel[0]} ..")
                 else:
@@ -631,7 +654,7 @@ class Bot(irc.IRCClient):
         print(f"Received invitation from {inviter} to join {params[1]}")
         if params[1] in self.channels:
             if params[1] in self.notOnChannels:
-                self.join(params[1])
+                self.join_channel(params[1])
 
     def irc_unknown(self, prefix, command, params):
         if command == 'PONG':
@@ -764,7 +787,7 @@ class Bot(irc.IRCClient):
             del self.rejoin_pending[channel]
             return
         print(f"🔄 Rejoin attempt {entry['attempts']} for {channel}...")
-        self.join(channel)
+        self.join_channel(channel)
 
     def load_commands(self):
 
