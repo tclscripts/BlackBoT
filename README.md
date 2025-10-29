@@ -67,13 +67,13 @@ The !help command is your gateway to discovering what BlackBoT can do.
 Dynamic filtering: Shows only commands you have access to (public, local per-channel, or global).
 
 Usage examples:
-
+``` 
 !help                  → Lists all accessible commands
 !help say              → Shows details about the "say" command
 !help #channel         → In PM, lists local commands for that channel
 
 Detailed descriptions: Each command can provide multi-line usage and notes.
-
+``` 
 ## 📂 File Structure
 ``` 
   BlackBoT/
