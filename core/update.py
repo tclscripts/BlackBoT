@@ -90,8 +90,35 @@ def parse_settings(file_path):
     return settings
 
 
-def merge_settings(old_settings, new_settings_content):
+def _first_hash_outside_quotes(s: str):
+    in_single = False
+    in_double = False
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "'" and not in_double:
+            # toggle single quotes (ignorăm escape-uri simple)
+            in_single = not in_single
+        elif c == '"' and not in_single:
+            in_double = not in_double
+        elif c == '#' and not in_single and not in_double:
+            return i
+        i += 1
+    return -1
 
+def _extract_inline_comment(text: str) -> str:
+    idx = _first_hash_outside_quotes(text)
+    if idx == -1:
+        return ""
+    return "  " + text[idx:].rstrip()
+
+def _strip_inline_comment(text: str) -> str:
+    idx = _first_hash_outside_quotes(text)
+    if idx == -1:
+        return text.rstrip()
+    return text[:idx].rstrip()
+
+def merge_settings(old_settings, new_settings_content):
     out_lines = []
     lines = new_settings_content.splitlines()
 
@@ -108,9 +135,7 @@ def merge_settings(old_settings, new_settings_content):
         indent, var, eq, rhs = m.groups()
 
         if var not in old_settings:
-            # valoare din noul fișier rămâne așa cum e; însă dacă e multi-linie, sărim peste blocul ei
             out_lines.append(line)
-            # consumă blocul multi-linie din noul fișier ca să nu dublăm linii
             open_b = sum(rhs.count(ch) for ch in "([{")
             close_b = sum(rhs.count(ch) for ch in ")]}")
             while (open_b > close_b) and (i + 1 < len(lines)):
@@ -122,16 +147,14 @@ def merge_settings(old_settings, new_settings_content):
             i += 1
             continue
 
-        comment = ""
-        if "#" in rhs:
+        new_comment = _extract_inline_comment(rhs)
 
-            comment = "  " + rhs[rhs.index("#"):].rstrip()
         old_value_text = old_settings[var].rstrip()
-
         old_value_lines = old_value_text.splitlines() or [old_value_text]
+
         if old_value_lines:
-            first = old_value_lines[0].rstrip()
-            out_lines.append(f"{indent}{var}{eq}{first}{comment}")
+            first = _strip_inline_comment(old_value_lines[0].rstrip())
+            out_lines.append(f"{indent}{var}{eq}{first}{new_comment}")
             for cont in old_value_lines[1:]:
                 out_lines.append(cont.rstrip())
 
@@ -150,6 +173,7 @@ def merge_settings(old_settings, new_settings_content):
             out_lines.append(f"{var} = {value_text}")
 
     return "\n".join(out_lines) + "\n"
+
 
 def _choose_extracted_root(tmpdir: Path) -> Path:
     for entry in tmpdir.iterdir():
