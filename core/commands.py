@@ -6,8 +6,102 @@ import threading
 import os
 from datetime import datetime
 from core.threading_utils import ThreadWorker
-from twisted.internet import reactor
 import core.seen as seen
+
+def cmd_help(self, channel, feedback, nick, host, msg):
+    msg = (msg or "").strip()
+
+    override_channel = None
+    tokens = msg.split()
+    if tokens and tokens[0].startswith("#") and channel.lower() == self.nickname.lower():
+        override_channel = tokens[0]
+        tokens = tokens[1:]
+
+    # 2) Separator opțional: !help sep=,
+    sep = " ; "
+    for t in list(tokens):
+        if t.lower().startswith("sep="):
+            raw = t[4:]
+            if raw:
+                # dacă e mai lung de 1 char, luăm doar primul caracter
+                sep_char = raw[0]
+                sep = f" {sep_char} "
+            tokens.remove(t)
+            break
+
+    q = " ".join(tokens).strip().lower() if tokens else ""
+    local_channel = override_channel or channel
+
+    # obține userId
+    handle_info = self.sql.sqlite_handle(self.botId, nick, host)
+    userId = handle_info[0] if handle_info else None
+
+    cmds = self.commands or []
+
+    # helper acces
+    def _has_access(cmd, local=False):
+        flags = (cmd.get("flags") or "").strip()
+        # Public
+        if not flags or flags == "-":
+            return True
+        if not userId:
+            return False
+        if local and local_channel and local_channel.startswith("#"):
+            return self.sql.sqlite_has_access_flags(self.botId, userId, flags, channel=local_channel)
+        # global
+        return self.sql.sqlite_has_access_flags(self.botId, userId, flags, channel=None)
+
+    if q and not q.startswith("#"):
+        target = next((c for c in cmds if c.get("name", "").lower() == q), None)
+        if not target:
+            self.send_message(feedback, f"❓ '{q}' command nu doesn't exists.")
+            return
+        if not (_has_access(target, local=True) or _has_access(target, local=False)):
+            self.send_message(feedback, f"⛔ You don't have access to '{target['name']}'.")
+            return
+        descr = target.get("description", "No description")
+        for i, line in enumerate(descr.splitlines()):
+            prefix = f"ℹ️ {s.char}{target['name']} — " if i == 0 else "   "
+            self.send_message(feedback, prefix + line.strip())
+        return
+
+    public_names, local_names, global_names = [], [], []
+    for c in cmds:
+        name = c.get("name")
+        if not name:
+            continue
+        flags = (c.get("flags") or "").strip()
+        entry = f"{s.char}{name}"
+
+        # Public
+        if not flags or flags == "-":
+            public_names.append(entry)
+            continue
+        # Local
+        if _has_access(c, local=True):
+            local_names.append(entry)
+            continue
+        # Global
+        if _has_access(c, local=False):
+            global_names.append(entry)
+
+    if not (public_names or local_names or global_names):
+        return
+    if public_names:
+        line = "📣 Public: " + sep.join(sorted(set(public_names), key=str.lower))
+        for part in self.split_irc_message_parts([line], separator=""):
+            self.send_message(feedback, part)
+
+    if local_channel and local_channel.startswith("#") and local_names:
+        line = f"🏷️ Local ({local_channel}): " + sep.join(sorted(set(local_names), key=str.lower))
+        for part in self.split_irc_message_parts([line], separator=""):
+            self.send_message(feedback, part)
+
+    if global_names:
+        line = "🌐 Global: " + sep.join(sorted(set(global_names), key=str.lower))
+        for part in self.split_irc_message_parts([line], separator=""):
+            self.send_message(feedback, part)
+
 
 def cmd_status(self, channel, feedback, nick, host, msg):
     import psutil
@@ -448,11 +542,21 @@ def cmd_hello(self, channel, feedback, nick, host, msg):
         hostname = self.get_hostname(nick, host, 0)
         sql_instance.sqlite_add_user_host(self.botId, userId, hostname)
         sql_instance.sqlite_add_global_access(self.botId, userId, accessId, self.nickname)
-        self.msg(nick, "Hello, {}! now you are my God. In order to protect your status, please setup your password "
-                   "using /msg {} pass <your password>".format(nick, self.nickname))
-        self.msg(nick, "If your ever forget your password, please set your email too, using /msg {} myset email "
-                   "<your email>.(please setup the email details in order for this recovery system to work.)"
-             .format(self.nickname))
+        self.msg(nick,
+                 f"👋 Hello, {nick}! You are now recognized as my owner (God mode).")
+
+        self.msg(nick,
+                 f"🔑 Please set your password to protect this status:\n"
+                 f"   /msg {self.nickname} pass <your_password>\n"
+                 f"(you can later change it with: /msg {self.nickname} newpass <new_password>)")
+
+        self.msg(nick,
+                 f"📧 To enable password recovery, register an email address:\n"
+                 f"   /msg {self.nickname} myset email <your_email>\n"
+                 f"(make sure email delivery is configured correctly in settings)")
+
+        self.msg(nick,
+                 f"ℹ️ Use {s.char}help to see available commands based on your access level.")
         self.unbind_hello = True
 
 
