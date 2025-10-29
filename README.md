@@ -58,24 +58,43 @@ Internet connection (for auto-update and external modules)
 Dependencies are listed in requirements.txt and will be installed automatically if you use the Bash script.
 ```
 
+---
+
+## 🆘 The !help Command
+
+The !help command is your gateway to discovering what BlackBoT can do.
+
+Dynamic filtering: Shows only commands you have access to (public, local per-channel, or global).
+
+Usage examples:
+
+!help                  → Lists all accessible commands
+!help say              → Shows details about the "say" command
+!help #channel         → In PM, lists local commands for that channel
+
+Detailed descriptions: Each command can provide multi-line usage and notes.
+
 ## 📂 File Structure
 ``` 
   BlackBoT/
-├── core/ # Core package with internal logic
-│ ├── commands.py # Implementation of commands (auth, access, uptime, etc.)
-│ ├── commands_map.py # Command mapping to IDs, flags, and descriptions
-│ ├── log.py # Logging module (can be wired to Python's logging)
-│ ├── SQL.py # SQLite wrapper (connections, queries, WAL mode)
-│ ├── sql_manager.py # SQL manager singleton (initializes DB and tables)
-│ ├── threading_utils.py # ThreadWorker with stop/reset and global events
-│ ├── update.py # Auto-update mechanism from GitHub
-│ └── Variables.py # Global variables: roles, settings, access lists
+├── core/                      # Core package with internal logic
+│   ├── commands.py            # Implementation of commands (auth, access, uptime, etc.)
+│   ├── commands_map.py        # Command mapping to IDs, flags, and descriptions
+│   ├── log.py                 # Logging module
+│   ├── monitor_client.py      # Background monitor for uptime and stats
+│   ├── seen.py                # "Seen" system: tracks last activity and stats
+│   ├── SQL.py                 # SQLite wrapper (connections, queries, WAL mode)
+│   ├── sql_manager.py         # SQL manager singleton (initializes DB and tables)
+│   ├── threading_utils.py     # ThreadWorker with stop/reset and global events
+│   ├── update.py              # Auto-update mechanism from GitHub
+│   └── Variables.py           # Global variables: roles, settings, access lists
 │
-├── BlackBoT.py # Main bot implementation (Twisted IRCClient)
-├── BlackBoT_RuN.sh # Bash script for setup and running on Linux
-├── Starter.py # Python entry point for launching the bot
-├── settings.py # Bot configuration (server, nick, passwords, etc.)
-├── requirements.txt # Python dependencies
-└── VERSION # Current version file
+├── BlackBoT.py                # Main bot implementation (Twisted IRCClient)
+├── BlackBoT_RuN.sh            # Bash script for setup and running on Linux
+├── Starter.py                 # Python entry point for launching the bot
+├── settings.py                # Bot configuration (server, nick, passwords, etc.)
+├── requirements.txt           # Python dependencies
+├── VERSION                    # Current version file
+└── changes                    # Changelog for updates
 ```
 
