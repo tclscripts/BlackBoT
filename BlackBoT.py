@@ -1366,7 +1366,6 @@ class BotFactory(protocol.ReconnectingClientFactory):
         self.port = int(port)
         if s.ssl_use == 1:
             sslContext = ssl.ClientContextFactory()
-            sslContext.method = ssl.PROTOCOL_TLSv1_2
             reactor.connectSSL(host, int(port), self, sslContext)
         else:
             reactor.connectTCP(host, int(port), self)
