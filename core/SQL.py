@@ -84,6 +84,94 @@ class SQL:
             cursor.close()
         return result
 
+    def sqlite_add_ban(self, *,
+                       botId,
+                       channel,  # str pentru local (ex. "#BT") sau None pentru global
+                       setter_userId,
+                       setter_nick,
+                       ban_mask,
+                       ban_type='mask',  # 'mask' or 'regex'
+                       sticky=False,
+                       reason=None,
+                       duration_seconds=None):
+        created = int(time.time())
+        expires = None
+        if duration_seconds:
+            try:
+                expires = created + int(duration_seconds)
+            except Exception:
+                expires = None
+
+        if channel:
+            sql = ("INSERT INTO BANS_LOCAL "
+                   "(botId, channel, setter_userId, setter_nick, ban_mask, ban_type, sticky, reason, created_at, duration_seconds, expires_at) "
+                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            params = (botId, channel, setter_userId, setter_nick, ban_mask, ban_type,
+                      1 if sticky else 0, reason, created, duration_seconds, expires)
+        else:
+            sql = ("INSERT INTO BANS_GLOBAL "
+                   "(botId, setter_userId, setter_nick, ban_mask, ban_type, sticky, reason, created_at, duration_seconds, expires_at) "
+                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            params = (botId, setter_userId, setter_nick, ban_mask, ban_type,
+                      1 if sticky else 0, reason, created, duration_seconds, expires)
+
+        return self.sqlite3_insert(sql, params)
+
+    def sqlite_remove_ban_by_id(self, ban_id, local=True):
+        if local:
+            sql = "DELETE FROM BANS_LOCAL WHERE id = ?"
+        else:
+            sql = "DELETE FROM BANS_GLOBAL WHERE id = ?"
+        return self.sqlite3_update(sql, (ban_id,))
+
+    def sqlite_find_bans(self, botId, channel=None, include_expired=False):
+        params = [botId]
+        now = int(time.time())
+        if channel:
+            # local bans pentru un canal
+            sql = "SELECT * FROM BANS_LOCAL WHERE botId = ? AND channel = ?"
+            params.append(channel)
+            if not include_expired:
+                sql += " AND (expires_at IS NULL OR expires_at > ?)"
+                params.append(now)
+        else:
+            # global bans
+            sql = "SELECT * FROM BANS_GLOBAL WHERE botId = ?"
+            if not include_expired:
+                sql += " AND (expires_at IS NULL OR expires_at > ?)"
+                params.append(now)
+
+        return self.sqlite_select(sql, tuple(params))
+
+    def sqlite_get_active_bans_for_channel(self, botId, channel):
+        now = int(time.time())
+        sql = (
+            "SELECT 'GLOBAL' AS scope, id, botId, NULL AS channel, setter_userId, setter_nick, "
+            "ban_mask, ban_type, sticky, reason, created_at, duration_seconds, expires_at, last_action_at, times_applied "
+            "FROM BANS_GLOBAL WHERE botId = ? AND (expires_at IS NULL OR expires_at > ?)"
+            " UNION ALL "
+            "SELECT 'LOCAL' AS scope, id, botId, channel, setter_userId, setter_nick, "
+            "ban_mask, ban_type, sticky, reason, created_at, duration_seconds, expires_at, last_action_at, times_applied "
+            "FROM BANS_LOCAL WHERE botId = ? AND channel = ? AND (expires_at IS NULL OR expires_at > ?)"
+        )
+        params = (botId, now, botId, channel, now)
+        return self.sqlite_select(sql, params)
+
+    def sqlite_mark_ban_applied(self, table, ban_id):
+        """
+        table: 'BANS_LOCAL' sau 'BANS_GLOBAL'
+        """
+        now = int(time.time())
+        sql = f"UPDATE {table} SET last_action_at = ?, times_applied = COALESCE(times_applied,0)+1 WHERE id = ?"
+        return self.sqlite3_update(sql, (now, ban_id))
+
+    def sqlite_expire_bans(self, botId):
+        now = int(time.time())
+        sql1 = "DELETE FROM BANS_LOCAL  WHERE botId = ? AND expires_at IS NOT NULL AND expires_at <= ?"
+        sql2 = "DELETE FROM BANS_GLOBAL WHERE botId = ? AND expires_at IS NOT NULL AND expires_at <= ?"
+        self.sqlite3_update(sql1, (botId, now))
+        self.sqlite3_update(sql2, (botId, now))
+
     def sqlite_has_active_ignores(self, botId):
         now = int(time.time())
         query = """
@@ -840,6 +928,44 @@ class SQL:
             )
         """
 
+        bans_local = """
+        CREATE TABLE IF NOT EXISTS bans_local (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    botId TEXT NOT NULL,
+    channel TEXT NOT NULL,                 -- channel where ban is set (like '#BT')
+    setter_userId INTEGER,                 -- user id who set the ban (nullable)
+    setter_nick TEXT,                      -- textual nick who set the ban (best-effort)
+    ban_mask TEXT NOT NULL,                -- the mask string as given (or normalized)
+    ban_type TEXT NOT NULL,                -- 'mask' | 'regex'
+    sticky INTEGER DEFAULT 0,              -- 1 = sticky, 0 = not sticky
+    reason TEXT,
+    created_at INTEGER NOT NULL,           -- epoch seconds
+    duration_seconds INTEGER,              -- null=permanent, else seconds
+    expires_at INTEGER,                    -- epoch seconds, null if permanent
+    last_action_at INTEGER,                -- epoch seconds when bot last applied a ban using this mask
+    times_applied INTEGER DEFAULT 0        -- how many times bot applied the ban
+)
+        """
+
+        bans_global = """
+        CREATE TABLE IF NOT EXISTS bans_global (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    botId TEXT NOT NULL,
+    setter_userId INTEGER,
+    setter_nick TEXT,
+    ban_mask TEXT NOT NULL,
+    ban_type TEXT NOT NULL,                -- 'mask' | 'regex'
+    sticky INTEGER DEFAULT 0,
+    reason TEXT,
+    created_at INTEGER NOT NULL,
+    duration_seconds INTEGER,
+    expires_at INTEGER,
+    last_action_at INTEGER,
+    times_applied INTEGER DEFAULT 0
+)
+        """
+
+
         self.sqlite3_execute(bot_settings)
         self.sqlite3_execute(valid_settings)
         self.sqlite3_execute(channels_query)
@@ -853,6 +979,8 @@ class SQL:
         self.sqlite3_execute(user_logins)
         self.sqlite3_execute(ignores)
         self.create_seen_tables()
+        self.sqlite3_execute(bans_local)
+        self.sqlite3_execute(bans_global)
 
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_users_bot ON USERS(botId)",
@@ -864,7 +992,9 @@ class SQL:
             "CREATE INDEX IF NOT EXISTS idx_globalaccess_keys ON GLOBALACCESS(botId, userId)",
             "CREATE INDEX IF NOT EXISTS idx_validaccess_flag ON VALIDACCESS(accessFlag)",
             "CREATE INDEX IF NOT EXISTS idx_userlogins_user ON USERLOGINS(botId, userId, timestamp)",
-            "CREATE INDEX IF NOT EXISTS idx_ignores_bot_host ON IGNORES(botId, host)"
+            "CREATE INDEX IF NOT EXISTS idx_ignores_bot_host ON IGNORES(botId, host)",
+            "CREATE INDEX IF NOT EXISTS idx_bans_global_bot ON bans_global(botId)",
+            "CREATE INDEX IF NOT EXISTS idx_bans_global_expires ON bans_global(expires_at)"
         ]
         for q in indexes:
             self.sqlite3_execute(q)

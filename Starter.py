@@ -37,17 +37,7 @@ if __name__ == '__main__':
         exit(1)
 
     host, port, vhost = BlackBoT.server_choose_to_connect()
-    host, port, vhost = host, int(port), vhost
-
     factory = BlackBoT.BotFactory(settings.nickname, settings.realname)
-    factory.server = vhost
-    factory.port   = port
-
-    if settings.ssl_use == 1:
-        sslContext = ClientSSLContext()
-        BlackBoT.reactor.connectSSL(host, port, factory, sslContext)
-    else:
-        BlackBoT.reactor.connectTCP(host, port, factory)
-
+    factory.connect_to(host, port, vhost)
     print(f"🚀 BlackBoT started successfully! Connecting to {host}:{port}")
     BlackBoT.reactor.run()

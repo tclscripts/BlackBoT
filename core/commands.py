@@ -7,6 +7,258 @@ import os
 from datetime import datetime
 from core.threading_utils import ThreadWorker
 import core.seen as seen
+import re, shlex
+
+def cmd_ban(self, channel, feedback, nick, host, msg):
+    """
+    Usage:
+      !ban <nick|mask|regex> [-regex] [-sticky] [-d 1h30m] [-reason "text"] [-g]
+    Examples:
+      !ban badguy
+      !ban *!*@bad.example -sticky -d 7d -reason "spam"
+      !ban ^.*@.*\\.evil\\.com$ -regex -reason "malware hosts"
+    """
+
+    # --- small helpers (local) ---
+    def _parse_duration_to_seconds(spec: str):
+        if not spec:
+            return None
+        total = 0
+        for qty, unit in re.findall(r"(\d+)\s*(h|m|s)", spec.lower()):
+            n = int(qty)
+            if unit == "h": total += n*3600
+            elif unit == "m": total += n*60
+            else: total += n
+        return total or None
+
+    def _safe_compile_regex(pattern: str):
+        if not pattern or len(pattern) > 300:
+            raise ValueError("regex pattern too long or empty")
+        return re.compile(pattern)
+
+    def _mask_to_re(mask: str):
+        esc = re.escape(mask)
+        esc = esc.replace(r'\*', '.*').replace(r'\?', '.')
+        return re.compile(r'^' + esc + r'$')
+
+    def _normalize_banmask_for_mode(ban_mask: str, member: dict | None):
+        # strip :realname if present; MODE +b nu acceptă realname
+        if ':' in ban_mask and ('!' in ban_mask or '@' in ban_mask):
+            return ban_mask.split(':', 1)[0]
+        # dacă e regex, încearcă fallback la *!ident@host (dacă avem member)
+        looks_regex = ban_mask.startswith('^') or ban_mask.endswith('$')
+        if looks_regex and member:
+            ident = member.get('ident') or '*'
+            mhost = member.get('host') or '*'
+            return f"*!{ident}@{mhost}"
+        return ban_mask
+
+    def _iter_channel_members(chan: str):
+        """
+        Iterează membrii din self.channel_details și normalizează la dict.
+        Structura rândului: [channel, nick, ident, host, privileges, realname, userId]
+        """
+        rows = getattr(self, 'channel_details', [])
+        for row in rows:
+            if not isinstance(row, (list, tuple)):
+                continue
+            if not row or row[0] != chan:
+                continue
+
+            n = row[1] if len(row) > 1 else None
+            ident = row[2] if len(row) > 2 else None
+            h = row[3] if len(row) > 3 else None
+            _priv = row[4] if len(row) > 4 else None
+            real = row[5] if len(row) > 5 else None
+            uid = row[6] if len(row) > 6 else None
+
+            yield {
+                'nick': n,
+                'ident': ident,
+                'host': h,
+                'realname': real,
+                'userId': uid,
+                'priv': _priv
+            }
+
+    # --- access check by command id (33 = ban) ---
+    if not self.check_command_access(channel, nick, host, '33', feedback):
+        return
+
+    if not msg:
+        self.send_message(feedback, "Usage: !ban <nick|mask|regex> [-regex] [-sticky] [-d 1h30m] [-reason \"text\"] [-g]")
+        return
+
+    # tokenize (acceptă ghilimele la -reason)
+    try:
+        tokens = shlex.split(msg)
+    except Exception:
+        tokens = msg.split()
+
+    target = tokens[0]
+    opts = tokens[1:]
+
+    # parse flags
+    duration = None
+    sticky = False
+    reason = None
+    is_regex = False
+    is_global = False
+
+    # map of options to consume
+    i = 0
+    while i < len(opts):
+        t = opts[i].lower()
+        if t in ('-g', '--global'):
+            is_global = True
+            i += 1
+            continue
+        if t.startswith('-d') or t.startswith('-t'):
+            # -d10m | -d=10m | -d 10m
+            if '=' in opts[i]:
+                val = opts[i].split('=', 1)[1]
+                i += 1
+            elif len(opts[i]) > 2:
+                val = opts[i][2:]
+                i += 1
+            else:
+                val = opts[i+1] if i+1 < len(opts) else None
+                i += 2
+            duration = _parse_duration_to_seconds(val) if val else None
+            continue
+        if t in ('-sticky', '--sticky'):
+            sticky = True
+            i += 1
+            continue
+        if t in ('-regex', '--regex'):
+            is_regex = True
+            i += 1
+            continue
+        if t.startswith('-reason='):
+            reason = opts[i].split('=', 1)[1]
+            i += 1
+            continue
+        if t == '-reason' and i+1 < len(opts):
+            reason = opts[i+1]
+            i += 2
+            continue
+        # unknown opt → skip
+        i += 1
+
+    # decide storage scope
+    store_channel = None if is_global or not (channel and channel.startswith('#')) else channel
+
+    # build ban_mask
+    ban_mask = target
+    if is_regex:
+        try:
+            _ = _safe_compile_regex(ban_mask)
+        except ValueError as e:
+            self.send_message(feedback, f"Invalid regex: {e}")
+            return
+    else:
+        # dacă nu arată ca hostmask, tratează ca nick -> încearcă să obții ident/host
+        looks_like_mask = any(c in target for c in ('!', '@', ':', '*', '?'))
+        if not looks_like_mask:
+            # întâi caută în runtime (în orice canal)
+            ident_host = self._get_any_ident_host(target) if hasattr(self, '_get_any_ident_host') else (None, None)
+            ident, hostpart = ident_host if ident_host else (None, None)
+
+            if not ident or not hostpart:
+                # încearcă WHOIS sync dacă există
+                info = None
+                if hasattr(self, 'whois_sync'):
+                    try:
+                        info = self.whois_sync(target, timeout=5)
+                    except Exception:
+                        info = None
+                if info:
+                    ident = info.get('user') or info.get('ident') or '*'
+                    hostpart = info.get('host') or '*'
+                    realname = info.get('realname') or ''
+                else:
+                    realname = ''
+
+            else:
+                # putem avea realname în cache (din WHO/RPL_WHOREPLY) — vezi channel_details
+                realname = None
+                # caută în channel_details ca să găsim realname
+                for m in _iter_channel_members(channel) if channel and channel.startswith('#') else []:
+                    if m['nick'].lower() == target.lower():
+                        realname = m.get('realname')
+                        break
+
+            # construim masca clasică
+            ident = ident or '*'
+            hostpart = hostpart or '*'
+            ban_mask = f"{target}!{ident}@{hostpart}"
+            if realname:
+                ban_mask = f"{ban_mask}:{realname}"
+        # altfel, userul a dat deja o mască → o folosim ca atare
+
+    # inserare în DB
+    setter_userId = None
+    try:
+        info = self.sql.sqlite_handle(self.botId, nick, host)  # (userId, ...)
+        setter_userId = info[0] if info else None
+    except Exception:
+        setter_userId = None
+
+    created_id = self.sql.sqlite_add_ban(
+        botId=self.botId,
+        channel=store_channel,                 # None => BANS_GLOBAL
+        setter_userId=setter_userId,
+        setter_nick=nick,
+        ban_mask=ban_mask,
+        ban_type=('regex' if is_regex else 'mask'),
+        sticky=sticky,
+        reason=reason,
+        duration_seconds=duration
+    )
+
+    # aplică imediat în canalul curent (dacă suntem într-un #channel)
+    applied = 0
+    if channel and channel.startswith('#'):
+        # pregătește matcher
+        if is_regex:
+            try:
+                rx = _safe_compile_regex(ban_mask)
+            except ValueError:
+                rx = None
+        else:
+            rx = _mask_to_re(ban_mask)
+
+        for m in _iter_channel_members(channel):
+            m_full = f"{m['nick']}!{m['ident']}@{m['host']}"
+            m_full_real = f"{m_full}:{m['realname']}" if m.get('realname') else m_full
+
+            matched = False
+            if is_regex and rx:
+                if rx.search(m_full_real) or rx.search(m_full):
+                    matched = True
+            elif not is_regex and rx:
+                if rx.match(m_full_real) or rx.match(m_full):
+                    matched = True
+
+            if matched:
+                mode_mask = _normalize_banmask_for_mode(ban_mask, m)
+                try:
+                    self.sendLine(f"MODE {channel} +b {mode_mask}")
+                    self.sendLine(f"KICK {channel} {m['nick']} :Banned ({reason or 'no reason'})")
+                    applied += 1
+                except Exception:
+                    pass
+
+    # marchează aplicarea
+    try:
+        table = 'BANS_LOCAL' if store_channel else 'BANS_GLOBAL'
+        self.sql.sqlite_mark_ban_applied(table, created_id)
+    except Exception:
+        pass
+
+    scope = "global" if store_channel is None else f"on {store_channel}"
+    self.send_message(feedback, f"✅ Ban stored (id={created_id}, {scope}). Applied to {applied} users immediately.")
+
 
 def cmd_help(self, channel, feedback, nick, host, msg):
     msg = (msg or "").strip()
@@ -529,9 +781,16 @@ def cmd_jump(self, channel, feedback, nick, host, msg):  # jump command
     result = self.check_command_access(channel, nick, host, '5', feedback)
     if not result:
         return
-    self.send_message(feedback, msg)
-    time.sleep(2)
-    self.quit()
+
+    self.send_message(feedback, "🔀 Jumping to next server...")
+
+    try:
+        self.sendLine(b"QUIT :jump")
+    except Exception:
+        pass
+
+    from twisted.internet import reactor
+    reactor.callLater(1.0, lambda: getattr(self.transport, "loseConnection", lambda: None)())
 
 
 def cmd_hello(self, channel, feedback, nick, host, msg):

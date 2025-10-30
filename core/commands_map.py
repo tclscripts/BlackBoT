@@ -138,5 +138,21 @@ command_definitions = [
                     '  !help                → List commands you can use (public/local/global)\n'
                     '  !help <command>      → Show details and description of a single command\n'
                     '  !help #channel       → In PM: list commands available for that channel\n',
-     'flags': '-', 'id': '32'}
+     'flags': '-', 'id': '32'},
+    {'name': 'ban',
+    'description': 'Ban a user or a hostmask (local or global) and store it in the DB.\n'
+                'Usage:\n'
+                '  !ban <nick|mask|regex> [-regex] [-sticky] [-d 1h30m] [-reason "text"]\n'
+                'Examples:\n'
+                '  !ban badguy                       → resolve nick to host and ban\n'
+                '  !ban *!*@bad.example -sticky      → wildcard host ban, kept enforced\n'
+                '  !ban ^.*@.*\\.evil\\.com$ -regex   → regex ban on host\n'
+                'Notes:\n'
+                '- Stores who set the ban, when, duration, reason, sticky flag.\n'
+                '- Local ban: run in a channel; Global ban: run in PM or pass -g (if supported by your cmd).\n'
+                '- Sticky bans are re-applied on join and can be periodically enforced.\n'
+                '- Regex requires -regex; wildcard masks support * and ?.\n'
+                '- Realname matching supported when mask includes :realname (e.g., *!*@*:John Doe).',
+    'flags': 'NnmMAO',
+    'id': '33'}
 ]

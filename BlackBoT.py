@@ -8,10 +8,10 @@ import logging
 import Starter
 import settings as s
 import socket
+
 from twisted.internet import protocol, ssl, reactor
 from twisted.words.protocols import irc
 from collections import defaultdict, deque
-
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'core'))
 from core import commands
@@ -27,7 +27,10 @@ import psutil
 from core.monitor_client import ensure_enrollment, send_heartbeat
 import platform
 from twisted.internet.threads import deferToThread
+import threading
 
+_GLOBAL_WORKERS: dict[str, threading.Thread] = {}
+_GLOBAL_LOCK = threading.Lock()
 
 
 class TTLCache(OrderedDict):
@@ -88,6 +91,7 @@ class Bot(irc.IRCClient):
             self.port = getattr(self.factory, "port", None) or getattr(peer, "port", None)
         except Exception:
             pass
+        self._init_worker_registry()
         self.version = _load_version()
         self.monitor_enabled = None
         self.hmac_secret = None
@@ -95,7 +99,7 @@ class Bot(irc.IRCClient):
         self.current_connect_time = 0
         self.current_start_time = 0
         self.recover_nick_timer_start = False
-        self.connected = False
+        self.connected = False  # devine True în connectionMade, False în connectionLost
         self.channel_details = []
         self.nickname = nickname
         self.realname = realname
@@ -105,8 +109,10 @@ class Bot(irc.IRCClient):
         self.username = s.username
         self.newbot = 0
         self.botId = 0
+        self.pending_whois = {}
         self.nickserv_waiting = False
         self.ignore_cleanup_started = False
+        self._hb_stop = None
         self.nick_already_in_use = 0
         self.channels = []
         self.multiple_logins = s.multiple_logins
@@ -126,43 +132,95 @@ class Bot(irc.IRCClient):
         self.sql = SQLManager.get_instance()
         self.newbot = self.sql.sqlite3_bot_birth(self.username, self.nickname, self.realname,
                                                  self.away)
-
         self.botId = self.newbot[1]
         self.host_to_nicks = defaultdict(set)
-
-        # ⏱️ Uptime update thread
-        self.thread_update_uptime = ThreadWorker(
-            target=lambda: self.sql.sqlite_update_uptime(self, self.botId),
-            name="uptime"
-        )
-        self.thread_update_uptime.start()
-
-        # 👥 Known users cleanup thread
-        self.thread_known_users_cleanup = ThreadWorker(target=self.cleanup_known_users, name="known_users")
-        self.thread_known_users_cleanup.start()
-
-        # 🚫 Ignore cleanup thread (doar dacă sunt active)
+        self._start_worker("uptime", target=lambda: self.sql.sqlite_update_uptime(self, self.botId),
+                           global_singleton=True)
+        self._start_worker("known_users", target=self.cleanup_known_users, global_singleton=True)
         if self.sql.sqlite_has_active_ignores(self.botId):
             print("⏳ Active ignores found. Starting cleanup thread...")
-            self.thread_ignore_cleanup = ThreadWorker(target=self.cleanup_ignores, name="ignore_cleanup")
-            self.thread_ignore_cleanup.start()
+            self._start_worker("ignore_cleanup", target=self.cleanup_ignores)
 
         # 💬 Message sender thread
         self.message_queue = queue.Queue()
         self.message_delay = s.message_delay
-        self.thread_message_sender = ThreadWorker(target=self._message_worker, name="message_sender")
-        self.thread_message_sender.start()
-
-        self.thread_check_for_changed_nick = ThreadWorker(target=self.recover_nickname, name="recover_nick")
+        self._start_worker("message_sender", target=self._message_worker, global_singleton=False)
+        self.thread_check_for_changed_nick = None
 
         if s.autoUpdateEnabled:
-            self.thread_auto_update = ThreadWorker(target=self.auto_update_check_loop, name="auto_update")
-            self.thread_auto_update.start()
+            self._start_worker("auto_update", target=self.auto_update_check_loop, global_singleton=True)
 
         if self.sql.sqlite_isBossOwner(self.botId) > 0:
             self.unbind_hello = True
         else:
             self.unbind_hello = False
+
+    def _init_worker_registry(self):
+        self._workers = {}
+        self._timers = set()
+
+    def _call_later(self, delay, func, *args, **kwargs):
+        dc = reactor.callLater(delay, func, *args, **kwargs)
+        self._timers.add(dc)
+        return dc
+
+    def _cancel_all_timers(self):
+        for dc in list(self._timers):
+            try:
+                if dc.active():
+                    dc.cancel()
+            except Exception:
+                pass
+            finally:
+                self._timers.discard(dc)
+
+    def _start_worker(self, name: str, target, daemon: bool = True, global_singleton: bool = True):
+        """
+        Pornește un worker numit `name`.
+        - Dacă global_singleton=True: NU mai pornește dacă există deja un thread activ cu același nume
+          (verificat în threading.enumerate()) – util când apare un nou Bot la reconectare.
+        - Folosește get_event(name).clear() doar când chiar pornim un thread nou.
+        """
+        # 1) dacă e singleton global, nu dubla
+        if global_singleton:
+            for t in threading.enumerate():
+                if t.name == name and getattr(t, "is_alive", lambda: False)():
+                    # reține-l în registru local și ieși fără să mai pornești alt thread
+                    self._workers[name] = t
+                    return None
+
+        # 2) dacă ai deja un worker înregistrat și încă e viu, nu-l dubla
+        existing = self._workers.get(name)
+        if existing and getattr(existing, "is_alive", lambda: False)():
+            return None
+
+        # 3) chiar pornim unul nou -> resetăm evenimentul
+        try:
+            get_event(name).clear()
+        except Exception:
+            pass
+
+        tw = ThreadWorker(target=target, name=name)
+        tw.daemon = daemon
+        tw.start()
+        self._workers[name] = tw
+        return tw
+
+    def _stop_worker(self, name: str, join_timeout: float = 1.0):
+        """Oprește un worker PORNIT de această instanță (nu atinge singleton-urile globale)."""
+        tw = self._workers.get(name)
+        if not tw:
+            return
+        try:
+            get_event(name).set()
+        except Exception:
+            pass
+        try:
+            if getattr(tw, "is_alive", lambda: False)():
+                tw.join(timeout=join_timeout)
+        except Exception:
+            pass
+        self._workers.pop(name, None)
 
     def _on_reactor(self, func, *args, **kwargs):
         from twisted.internet import reactor
@@ -173,6 +231,21 @@ class Bot(irc.IRCClient):
 
     def irc_sendline(self, line: str):
         self._on_reactor(self.sendLine, line.encode("utf-8"))
+
+    def irc_RPL_WHOISUSER(self, prefix, params):
+        # params: [me, nick, user, host, '*', realname]
+        _, nick, user, host, _, realname = params
+        self.pending_whois[nick] = {
+            'nick': nick,
+            'user': user,
+            'host': host,
+            'realname': realname
+        }
+
+    def irc_RPL_ENDOFWHOIS(self, prefix, params):
+        nick = params[1]
+        if nick not in self.pending_whois:
+            self.pending_whois[nick] = None
 
     def _monitor_init_worker(self):
         try:
@@ -203,7 +276,6 @@ class Bot(irc.IRCClient):
         if getattr(self, "_monitor_init_started", False):
             return
         self._monitor_init_started = True
-        # rulează worker-ul în threadpool-ul Twisted
         d = deferToThread(self._monitor_init_worker)
         d.addErrback(lambda f: print(f"❌ monitor_init errback: {f.getErrorMessage()}"))
 
@@ -234,10 +306,14 @@ class Bot(irc.IRCClient):
         if getattr(self, "_hb_thread", None):
             return
 
+        # inițializează evenimentul de oprire (pentru stop prompt)
+        self._hb_stop = threading.Event()
+
         def _loop():
             interval = 30
             backoff = interval
-            while getattr(self, "monitor_enabled", False):
+            # rulează doar cât timp monitorul este activ, conexiunea este activă și nu s-a cerut stop
+            while getattr(self, "monitor_enabled", False) and self.connected and not self._hb_stop.is_set():
                 try:
                     payload = self._collect_metrics()
                     ok = send_heartbeat(self.monitorId, self.hmac_secret, payload)
@@ -247,11 +323,18 @@ class Bot(irc.IRCClient):
                         backoff = min(backoff * 2, 300)
                 except Exception:
                     backoff = min(backoff * 2, 300)
-                time.sleep(backoff)
+                # nu dormi „orb”: revino rapid dacă s-a cerut oprire
+                self._hb_stop.wait(backoff)
 
-        self._hb_thread = ThreadWorker(target=_loop, name=f"heartbeat_{self.nickname}")
-        self._hb_thread.daemon = True
-        self._hb_thread.start()
+        self._start_worker("heartbeat", target=_loop, global_singleton=False)
+
+    def _stop_heartbeat_loop(self):
+        try:
+            if getattr(self, "_hb_stop", None):
+                self._hb_stop.set()
+        except Exception:
+            pass
+        print("🛑 Heartbeat loop stopped.")
 
     def _get_ident_host_from_channel(self, channel: str, nick: str):
         for c, n, ident, host, *_ in self.channel_details:
@@ -266,7 +349,7 @@ class Bot(irc.IRCClient):
         return None, None
 
     def _remove_user_from_channel(self, channel: str, nick: str):
-        
+
         nick = nick.lower()
         self.channel_details = [
             row for row in self.channel_details
@@ -284,7 +367,6 @@ class Bot(irc.IRCClient):
             self.channel_details = [
                 arr for arr in self.channel_details if arr[1].lower() != user.lower()
             ]
-        # logout on quit
         self.logoutOnQuit(user)
         nick = user.split('!')[0]
         ident, host = self._get_any_ident_host(nick)
@@ -295,11 +377,12 @@ class Bot(irc.IRCClient):
         # load commands
         self.load_commands()
         try:
-            self._start_monitor_init_async()
+            # pornește monitorul doar dacă suntem efectiv conectați
+            if self.connected:
+                self._start_monitor_init_async()
         except Exception as e:
             print(f"⚠️ Monitor init failed: {e}")
             self.monitor_enabled = False
-        # reset known users and user_cache
         if self.known_users:
             print("🔄 Resetting user caches.")
             self.known_users.clear()
@@ -321,6 +404,30 @@ class Bot(irc.IRCClient):
             return
         super().lineReceived(line)
 
+    # --- Conexiune socket Twisted ---
+    def connectionMade(self):
+        super().connectionMade()
+        self.connected = True
+
+    def connectionLost(self, reason):
+        super().connectionLost(reason)
+        self.connected = False
+
+        # per-conexiune
+        self._stop_heartbeat_loop()
+        self._stop_worker("message_sender")
+        self._stop_worker("recover_nick")
+        self._stop_worker("logged_users")
+
+        self.monitor_enabled = False
+        try:
+            self._cancel_all_timers()
+        except Exception:
+            pass
+
+        print(
+            f"🔌 Disconnected from IRC: {reason}. Heartbeat & per-connection workers stopped; global workers kept alive.")
+
     def _ensure_channel_canonical_in_db(self, requested_name: str, canonical_name: str):
 
         if self.sql.sqlite_channel_exists_exact(self.botId, canonical_name):
@@ -332,7 +439,6 @@ class Bot(irc.IRCClient):
             return
 
         self.sql.sqlite3_addchan(canonical_name, self.username, self.botId)
-
 
     def joined(self, channel):
         if self.notOnChannels and channel.lower() in (c.lower() for c in self.notOnChannels):
@@ -351,7 +457,7 @@ class Bot(irc.IRCClient):
         self.sendLine(f"WHO {channel}")
 
     def userJoined(self, user, channel):
-        
+
         if self.channel_details:
             self.sendLine(f"WHO {user}")
 
@@ -360,20 +466,20 @@ class Bot(irc.IRCClient):
         seen.on_join(self.sql, self.botId, channel, user, ident, host)
 
     def userLeft(self, user, channel):
-        
+
         nick = user.split('!')[0]
         ident, host = self._get_ident_host_from_channel(channel, nick)
         seen.on_part(self.sql, self.botId, channel, nick, ident=ident, host=host, reason="left")
         self._remove_user_from_channel(channel, nick)
 
     def userKicked(self, kicked, channel, kicker, message):
-        
+
         ident, host = self._get_ident_host_from_channel(channel, kicked)
         seen.on_kick(self.sql, self.botId, channel, kicked, kicker, message, ident=ident, host=host)
         self._remove_user_from_channel(channel, kicked)
 
     def kickedFrom(self, channel, kicker, message):
-        
+
         if channel.lower() in (c.lower() for c in self.notOnChannels):
             self.notOnChannels.append(channel)
         self.channel_details = [arr for arr in self.channel_details if channel in arr]
@@ -410,7 +516,7 @@ class Bot(irc.IRCClient):
 
     # add channel to pending list
     def addChannelToPendingList(self, channel, reason):
-        
+
         if channel in self.rejoin_pending:
             return
         self.rejoin_pending[channel] = {
@@ -463,8 +569,26 @@ class Bot(irc.IRCClient):
                 self.thread_ignore_cleanup.start()
                 self.ignore_cleanup_started = True
 
+    def whois_sync(self, nick, timeout=5):
+        """
+        Perform a WHOIS lookup and wait synchronously for reply.
+        Returns dict with { 'nick':..., 'user':..., 'host':..., 'realname':... } or None on timeout.
+        """
+        self.pending_whois[nick] = None
+        self.sendLine(f"WHOIS {nick}")
+
+        start = time.time()
+        while time.time() - start < timeout:
+            if self.pending_whois[nick] is not None:
+                return self.pending_whois.pop(nick)
+            time.sleep(0.1)  # small delay to avoid busy loop
+        # timeout
+        self.pending_whois.pop(nick, None)
+        return None
+
     def _message_worker(self):
-        while True:
+        stop_ev = get_event("message_sender")
+        while not stop_ev.is_set():
             try:
                 channel, message = self.message_queue.get(timeout=1)
                 if channel and message:
@@ -518,7 +642,6 @@ class Bot(irc.IRCClient):
                 return None
             handle = self.logged_in_users[userId].get("nick", nick)  # fallback to nick if missing
 
-
         if not self.check_access(channel, userId, flags_needed):
             return None
         stored_hash = self.sql.sqlite_get_user_password(userId)
@@ -537,16 +660,26 @@ class Bot(irc.IRCClient):
 
     # check logged users to deauth
     def _check_logged_users_loop(self):
-        while True:
+
+        stop_ev = get_event("logged_users")
+
+        full_interval = max(1, int(3600 * getattr(s, "autoDeauthTime", 1)))
+
+        while not stop_ev.is_set():
             if not self.logged_in_users:
                 print("✅ No more logged-in users. Monitor thread exiting.")
                 self.thread_check_logged_users_started = False
                 break
+
             try:
                 self.clean_logged_users()
             except Exception as e:
                 print(f"⚠️ Exception in user cleaner thread: {e}")
-            time.sleep(3600 * s.autoDeauthTime)
+
+            for _ in range(full_interval):
+                if stop_ev.wait(1.0):
+                    break
+        self.thread_check_logged_users_started = False
 
     def clean_logged_users(self, silent=False):
         to_remove = []
@@ -596,7 +729,7 @@ class Bot(irc.IRCClient):
         return None
 
     def modeChanged(self, user, channel, set, modes, args):
-        
+
         sign = "+" if set else "-"
         if channel not in self.channels:
             return
@@ -712,7 +845,6 @@ class Bot(irc.IRCClient):
             if wnickname == s.nickname:
                 return
 
-            # 3) classic login + attach ALL nicks seen on the same host
             if userId and not self.is_logged_in(userId, lhost):
                 stored_hash = self.sql.sqlite_get_user_password(userId)
                 if not stored_hash:
@@ -730,17 +862,9 @@ class Bot(irc.IRCClient):
                 nicks_on_host = self.host_to_nicks.get(lhost, set()) or {wnickname}
                 self.logged_in_users[userId]["nicks"].update(nicks_on_host)
                 self.logged_in_users[userId]["nick"] = wnickname
-
-                if not self.thread_check_logged_users_started:
-                    self.thread_check_logged_users = ThreadWorker(
-                        target=self._check_logged_users_loop, name="logged_users"
-                    )
-                    self.thread_check_logged_users.daemon = True
-                    self.thread_check_logged_users.start()
-                    self.thread_check_logged_users_started = True
+                self._start_worker("logged_users", target=self._check_logged_users_loop, global_singleton=True)
 
             else:
-                # 4) already logged on this host? just add the nick to the set
                 if userId and self.is_logged_in(userId, lhost):
                     self.logged_in_users[userId].setdefault("nicks", set()).add(wnickname)
 
@@ -756,7 +880,7 @@ class Bot(irc.IRCClient):
             self.nick_already_in_use = 1
             self.nickname = s.altnick
             if self.nickname != s.nickname:  # start doar dacă e alt nick
-                self.thread_check_for_changed_nick.start()
+                self._start_worker("recover_nick", target=self.recover_nickname, global_singleton=False)
 
     # check if logged
     def is_logged_in(self, userId, host):
@@ -768,7 +892,7 @@ class Bot(irc.IRCClient):
             return
 
         delay = self.rejoin_pending[channel]['delay']
-        reactor.callLater(delay, self._attempt_rejoin, channel)
+        self._call_later(delay, self._attempt_rejoin, channel)
 
     # attempt rejoin
     def _attempt_rejoin(self, channel):
@@ -1201,12 +1325,22 @@ class Bot(irc.IRCClient):
 
 
 class BotFactory(protocol.ReconnectingClientFactory):
+    """
+    Factory care rotește prin lista de servere (settings.servers) atât la deconectare,
+    cât și dacă nu se poate conecta inițial.
+    """
     def __init__(self, nickname, realname):
         self.nickname = nickname
         self.realname = realname
         self.away = s.away
         self.server = None
         self.port = None
+
+        # parametrii de backoff ai ReconnectingClientFactory (folosești resetDelay când te reconectezi cu succes)
+        self.initialDelay = 1.0
+        self.maxDelay = 60.0
+        self.factor = 1.5
+        self.jitter = 0.1
 
     def buildProtocol(self, addr):
         global current_instance
@@ -1215,24 +1349,37 @@ class BotFactory(protocol.ReconnectingClientFactory):
         bot.server = self.server
         bot.port = self.port
         current_instance = bot
+        try:
+            self.resetDelay()  # conexiune reușită → reset backoff
+        except Exception:
+            pass
         return bot
 
-    def clientConnectionLost(self, connector, reason):
-        global servers_order
-        print(f"Connection lost: {reason}. Attempting to reconnect...")
-        v.connected = False
-        servers_order += 1
-        if servers_order >= len(s.servers):
-            servers_order = 0
-        get_server = server_choose_to_connect()
-        self.server = get_server[2]
-        self.port = int(get_server[1])
+    def rotate_and_connect(self):
+        host, port, vhost = server_next_round_robin()
+        print(f"🔁 Reconnecting to {host}:{port} (vhost={vhost}) ...")
+        self.connect_to(host, port, vhost)
+
+    def connect_to(self, host, port, vhost):
+        """Conectează la (host,port) și setează meta pentru protocol."""
+        self.server = vhost
+        self.port = int(port)
         if s.ssl_use == 1:
             sslContext = ssl.ClientContextFactory()
             sslContext.method = ssl.PROTOCOL_TLSv1_2
-            reactor.connectSSL(get_server[0], int(get_server[1]), BotFactory(s.nickname, s.realname), sslContext)
+            reactor.connectSSL(host, int(port), self, sslContext)
         else:
-            reactor.connectTCP(get_server[0], int(get_server[1]), BotFactory(s.nickname, s.realname))
+            reactor.connectTCP(host, int(port), self)
+
+    def clientConnectionLost(self, connector, reason):
+        print(f"Connection lost: {reason}. Rotating server & reconnecting...")
+        v.connected = False
+        self.rotate_and_connect()
+
+    def clientConnectionFailed(self, connector, reason):
+        print(f"Connection failed: {reason}. Rotating server & retrying...")
+        v.connected = False
+        self.rotate_and_connect()
 
 
 def server_has_port(server):
@@ -1324,3 +1471,10 @@ def server_choose_to_connect():
             valid_server = True
             server = connect
     return [server[0], server[1], server[2]]
+
+def server_next_round_robin():
+    global servers_order
+    if not s.servers:
+        raise RuntimeError("No servers configured.")
+    servers_order = (servers_order + 1) % len(s.servers)
+    return server_choose_to_connect()

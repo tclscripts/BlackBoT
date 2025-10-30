@@ -1,5 +1,5 @@
-# core/monitor_client.py
 import os, json, time, stat, platform, hmac, hashlib, requests, socket, uuid
+import settings as s
 
 CRED_PATH = os.getenv("BLACKBOT_CRED", "./files/cred.json")
 
@@ -27,6 +27,9 @@ def _write_creds(data: dict):
         pass
 
 def _api_base():
+    # Kill-switch global din mediu: dacă e setat, monitorul este dezactivat complet.
+    if not s.monitor_status:
+        return None
     base = "http://87.106.56.156:8000"
     return base
 
@@ -50,13 +53,14 @@ def _machine_fingerprint() -> str:
     return fp
 
 def ensure_enrollment(nickname: str, version: str, server_str: str) -> dict | None:
-    creds = _read_creds()
-    if creds:
-        return creds
-
+    # dacă kill switch-ul este activ, nu facem nimic
     base = _api_base()
     if not base:
         return None
+
+    creds = _read_creds()
+    if creds:
+        return creds
 
     fp = _machine_fingerprint()
     payload = {

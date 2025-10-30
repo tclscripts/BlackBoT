@@ -113,3 +113,10 @@ sqlite3_database = "work.db"      # SQLite3 DB filename
 # ───────────────────────────────────────────────
 
 version = "BlackBoT: Python Edition"  # CTCP VERSION response
+
+# ───────────────────────────────────────────────
+# BlackBoT monitor status (send packages to uptime.tclscripts.net)
+# True or False
+# ───────────────────────────────────────────────
+
+monitor_status = True
