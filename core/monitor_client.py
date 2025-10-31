@@ -53,7 +53,6 @@ def _machine_fingerprint() -> str:
     return fp
 
 def ensure_enrollment(nickname: str, version: str, server_str: str) -> dict | None:
-    # dacă kill switch-ul este activ, nu facem nimic
     base = _api_base()
     if not base:
         return None
@@ -86,6 +85,30 @@ def ensure_enrollment(nickname: str, version: str, server_str: str) -> dict | No
     else:
         return None
 
+def send_monitor_offline(bot_id: str, hmac_secret: str) -> bool:
+    base = _api_base()
+    if not base:
+        return False
+    url = f"{base.rstrip('/')}/api/offline"
+    payload = {"bot_id": bot_id}
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    token = os.getenv("MONITOR_TOKEN", "7CWwLTDh6ReQLY7rEe2fk5BvBvEeAg3pF6MqhphewjREsMgLLXDVavlY1VI6o3Lc")
+    ts = str(time.time())
+    sig = hmac.new(hmac_secret.encode("utf-8"), body + ts.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Timestamp": ts,
+        "X-Signature": f"sha256={sig}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, data=body, timeout=5)
+        return resp.status_code == 200
+    except requests.RequestException:
+        return False
+
 def send_heartbeat(bot_id: str, hmac_secret: str, payload: dict) -> bool:
     base = _api_base()
     if not base:
@@ -93,7 +116,6 @@ def send_heartbeat(bot_id: str, hmac_secret: str, payload: dict) -> bool:
 
     url = f"{base.rstrip('/')}/api/heartbeat"
 
-    # inject bot_id dacă nu e deja
     full_payload = dict(payload)
     full_payload.setdefault("bot_id", bot_id)
 
@@ -117,3 +139,5 @@ def send_heartbeat(bot_id: str, hmac_secret: str, payload: dict) -> bool:
             return False
     except Exception as e:
         return False
+
+

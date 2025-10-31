@@ -705,31 +705,37 @@ def cmd_channels(self, channel, feedback, nick, host, msg):
     result = self.check_command_access(channel, nick, host, '11', feedback)
     if not result:
         return
-    sql = result['sql']
-    channels = self.sql.sqlite3_channels(self.botId)
 
+    channels = self.sql.sqlite3_channels(self.botId)
     if not channels:
         self.send_message(feedback, "🔍 No registered channels.")
         return
+
+    # set cu numele canalelor la care botul e conectat (lower-case pentru comparații robuste)
+    joined_lower = {c.lower() for c in (self.channels or [])}
 
     entries = []
     for chan_row in channels:
         chan = chan_row[0]
         flags = []
 
+        # 1) suspended?
         if self.sql.sqlite_is_channel_suspended(chan):
             flags.append("🔒suspended")
-        elif chan.lower() in (c.lower() for c in self.channels):
-            flags.append("❌offline")
-        elif not self.user_is_op(self.nickname, chan):
-            flags.append("⚠️no-op")
+        else:
+            # 2) botul este pe canal?
+            on_channel = chan.lower() in joined_lower
+            if not on_channel:
+                flags.append("❌offline")
+            else:
+                # 3) e op doar dacă e pe canal
+                if not self.user_is_op(self.nickname, chan):
+                    flags.append("⚠️no-op")
 
         status = ",".join(flags) if flags else "✅ok"
         entries.append(f"{chan}:{status}")
 
-    messages = self.split_irc_message_parts(entries)
-
-    for msg_part in messages:
+    for msg_part in self.split_irc_message_parts(entries):
         self.send_message(feedback, msg_part)
 
 

@@ -8,6 +8,7 @@ import logging
 import Starter
 import settings as s
 import socket
+from functools import partial
 
 from twisted.internet import protocol, ssl, reactor
 from twisted.words.protocols import irc
@@ -24,7 +25,7 @@ from core.threading_utils import get_event
 from collections import OrderedDict
 import time
 import psutil
-from core.monitor_client import ensure_enrollment, send_heartbeat
+from core.monitor_client import ensure_enrollment, send_heartbeat, send_monitor_offline
 import platform
 from twisted.internet.threads import deferToThread
 import threading
@@ -92,6 +93,7 @@ class Bot(irc.IRCClient):
         except Exception:
             pass
         self._init_worker_registry()
+        self.monitorId = None
         self.version = _load_version()
         self.monitor_enabled = None
         self.hmac_secret = None
@@ -154,6 +156,11 @@ class Bot(irc.IRCClient):
             self.unbind_hello = True
         else:
             self.unbind_hello = False
+
+        reactor.addSystemEventTrigger(
+            'before', 'shutdown',
+            partial(send_monitor_offline, self.monitorId, self.hmac_secret)
+        )
 
     def _init_worker_registry(self):
         self._workers = {}
@@ -410,10 +417,13 @@ class Bot(irc.IRCClient):
         self.connected = True
 
     def connectionLost(self, reason):
+        try:
+            send_monitor_offline(self.monitorId, self.hmac_secret)
+        except Exception:
+            pass
         super().connectionLost(reason)
         self.connected = False
 
-        # per-conexiune
         self._stop_heartbeat_loop()
         self._stop_worker("message_sender")
         self._stop_worker("recover_nick")
