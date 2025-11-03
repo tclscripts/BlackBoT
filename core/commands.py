@@ -265,6 +265,7 @@ def cmd_help(self, channel, feedback, nick, host, msg):
 
     override_channel = None
     tokens = msg.split()
+    # 1) !help #chan ...  (respectăm override-ul explicit)
     if tokens and tokens[0].startswith("#") and channel.lower() == self.nickname.lower():
         override_channel = tokens[0]
         tokens = tokens[1:]
@@ -275,16 +276,31 @@ def cmd_help(self, channel, feedback, nick, host, msg):
         if t.lower().startswith("sep="):
             raw = t[4:]
             if raw:
-                # dacă e mai lung de 1 char, luăm doar primul caracter
                 sep_char = raw[0]
                 sep = f" {sep_char} "
             tokens.remove(t)
             break
 
     q = " ".join(tokens).strip().lower() if tokens else ""
-    local_channel = override_channel or channel
 
-    # obține userId
+    # ---------- PM/DCC local channel guess ----------
+    # Dacă suntem în PM/DCC (channel == numele botului) și NU avem override,
+    # încercăm să ghicim un canal comun cu userul.
+    guessed_channel = None
+    if not override_channel and channel.lower() == self.nickname.lower():
+        try:
+            user_chans = {row[0] for row in self.channel_details
+                          if (row[1] or "").lower() == nick.lower()}
+            bot_chans = set(self.channels or [])
+            commons = sorted(user_chans & bot_chans, key=str.lower)
+            if len(commons) == 1:
+                guessed_channel = commons[0]
+        except Exception:
+            pass
+
+    local_channel = override_channel or guessed_channel or channel
+
+    # obține userId (hostul e deja „îmbunătățit” de get_hostname pentru DCC)
     handle_info = self.sql.sqlite_handle(self.botId, nick, host)
     userId = handle_info[0] if handle_info else None
 
@@ -298,15 +314,16 @@ def cmd_help(self, channel, feedback, nick, host, msg):
             return True
         if not userId:
             return False
-        if local and local_channel and local_channel.startswith("#"):
+        if local and local_channel and str(local_channel).startswith("#"):
             return self.sql.sqlite_has_access_flags(self.botId, userId, flags, channel=local_channel)
         # global
         return self.sql.sqlite_has_access_flags(self.botId, userId, flags, channel=None)
 
+    # Dacă s-a cerut detaliu pentru o comandă: !help op / help op
     if q and not q.startswith("#"):
         target = next((c for c in cmds if c.get("name", "").lower() == q), None)
         if not target:
-            self.send_message(feedback, f"❓ '{q}' command nu doesn't exists.")
+            self.send_message(feedback, f"❓ '{q}' command doesn't exist.")
             return
         if not (_has_access(target, local=True) or _has_access(target, local=False)):
             self.send_message(feedback, f"⛔ You don't have access to '{target['name']}'.")
@@ -329,7 +346,7 @@ def cmd_help(self, channel, feedback, nick, host, msg):
         if not flags or flags == "-":
             public_names.append(entry)
             continue
-        # Local
+        # Local (pe canalul dedus/explicit)
         if _has_access(c, local=True):
             local_names.append(entry)
             continue
@@ -339,15 +356,33 @@ def cmd_help(self, channel, feedback, nick, host, msg):
 
     if not (public_names or local_names or global_names):
         return
+
     if public_names:
         line = "📣 Public: " + sep.join(sorted(set(public_names), key=str.lower))
         for part in self.split_irc_message_parts([line], separator=""):
             self.send_message(feedback, part)
 
-    if local_channel and local_channel.startswith("#") and local_names:
+    # Afișăm Local dacă avem un #canal valid
+    if local_channel and str(local_channel).startswith("#") and local_names:
         line = f"🏷️ Local ({local_channel}): " + sep.join(sorted(set(local_names), key=str.lower))
         for part in self.split_irc_message_parts([line], separator=""):
             self.send_message(feedback, part)
+    else:
+        # în PM/DCC, dacă există mai multe canale comune și userul are și comenzi locale,
+        # oferim un hint explicit
+        if channel.lower() == self.nickname.lower():
+            try:
+                user_chans = {row[0] for row in self.channel_details
+                              if (row[1] or "").lower() == nick.lower()}
+                bot_chans = set(self.channels or [])
+                commons = sorted(user_chans & bot_chans, key=str.lower)
+                if len(commons) > 1 and local_names:
+                    self.send_message(
+                        feedback,
+                        f"ℹ️ For channel-scoped commands, use: !help #channel  (common: {', '.join(commons)})"
+                    )
+            except Exception:
+                pass
 
     if global_names:
         line = "🌐 Global: " + sep.join(sorted(set(global_names), key=str.lower))
@@ -457,11 +492,13 @@ def cmd_deauth(self, channel, feedback, nick, host, msg):
 
 
 def cmd_update(self, channel, feedback, nick, host, msg):
+    import core.update as update  # ca să fim siguri că modulul e accesibil
+
     result = self.check_command_access(channel, nick, host, '26', feedback)
     if not result:
         return
 
-    arg = msg.strip().lower()
+    arg = (msg or "").strip().lower()
 
     if arg == "check":
         local_version = update.read_local_version()
@@ -473,10 +510,24 @@ def cmd_update(self, channel, feedback, nick, host, msg):
             self.send_message(feedback, f"🔄 Update available: {remote_version} (current: {local_version})")
         else:
             self.send_message(feedback, f"✅ Already up to date (version {local_version})")
+        return
 
     elif arg == "start":
-        self.send_message(feedback, "🔁 Starting update ..")
+        local_version = update.read_local_version()
+        remote_version = update.fetch_remote_version()
+        if not remote_version:
+            self.send_message(feedback, "❌ Unable to fetch remote version, update aborted.")
+            return
+
+        if remote_version == local_version:
+            self.send_message(feedback, f"✅ Already up to date (version {local_version}). No update needed.")
+            return
+
+        # altfel pornește efectiv update-ul
+        self.send_message(feedback, f"🔁 Starting update → {remote_version} (current: {local_version}) ...")
         ThreadWorker(target=lambda: update.update_from_github(self, feedback), name="manual_update").start()
+        return
+
     else:
         self.send_message(feedback, f"⚠️ Usage: {s.char}update check | {s.char}update start")
 
@@ -710,20 +761,15 @@ def cmd_channels(self, channel, feedback, nick, host, msg):
     if not channels:
         self.send_message(feedback, "🔍 No registered channels.")
         return
-
-    # set cu numele canalelor la care botul e conectat (lower-case pentru comparații robuste)
     joined_lower = {c.lower() for c in (self.channels or [])}
 
     entries = []
     for chan_row in channels:
         chan = chan_row[0]
         flags = []
-
-        # 1) suspended?
         if self.sql.sqlite_is_channel_suspended(chan):
             flags.append("🔒suspended")
         else:
-            # 2) botul este pe canal?
             on_channel = chan.lower() in joined_lower
             if not on_channel:
                 flags.append("❌offline")
@@ -768,19 +814,47 @@ def cmd_delchan(self, channel, feedback, nick, host, msg):
     if not result:
         return
     sql_instance = result['sql']
-    checkIfValid = sql_instance.sqlite_validchan(channel)
-    if checkIfValid:
-        self.part(channel)  # part channel.
-        if channel.lower() in (c.lower() for c in self.channels):
-            self.channels.remove(channel)
-        if channel in self.notOnChannels:
-            self.notOnChannels.remove(channel)
-        if self.channel_details:
-            self.channel_details = [arr for arr in self.channel_details if channel not in arr]
-        sql_instance.sqlite3_delchan(channel, self.botId)
-        self.send_message(feedback, "Removed channel '{}' from my database".format(channel))
-    else:
-        self.send_message(feedback, "The channel '{}' is not added in my database.".format(channel))
+
+    try:
+        canonical = self.sql.sqlite_find_channel_case_insensitive(self.botId, channel) or channel
+    except Exception:
+        canonical = channel
+
+    if not sql_instance.sqlite_validchan(canonical):
+        self.send_message(feedback, f"The channel '{channel}' is not added in my database.")
+        return
+
+    try:
+        if any(c.lower() == canonical.lower() for c in (self.channels or [])):
+            self.part(canonical)
+    except Exception:
+        pass
+
+    # 4) Curăță listele interne în mod case-insensitive
+    def _remove_case_insensitive(lst, value):
+        if not lst:
+            return
+        real = next((x for x in lst if x.lower() == value.lower()), None)
+        if real:
+            try:
+                lst.remove(real)
+            except ValueError:
+                pass
+
+    _remove_case_insensitive(self.channels, canonical)
+    _remove_case_insensitive(self.notOnChannels, canonical)
+
+    if self.channel_details:
+        self.channel_details = [arr for arr in self.channel_details if (arr[0] or "").lower() != canonical.lower()]
+
+    try:
+        sql_instance.sqlite3_delchan(canonical, self.botId)
+    except Exception as e:
+        self.send_message(feedback, f"DB error while removing '{canonical}': {e}")
+        return
+
+    self.send_message(feedback, f"Removed channel '{canonical}' from my database")
+
 
 
 def cmd_jump(self, channel, feedback, nick, host, msg):  # jump command
@@ -1280,6 +1354,74 @@ def cmd_info(self, channel, feedback, nick, host, msg):
                                 f"➤ Access - Global: {global_str}, Local on {channel}: {local_str}\n"
                                 f"➤ Added by: {added_by or '-'} / Last modified by: {last_modified_by or '-'}\n"
                                 f"🔧 Settings:\n{settings_str}")
+
+def cmd_chat(self, channel, feedback, nick, host, msg):
+    """
+    !chat            -> open (offer) a DCC chat to the caller (unless one already exists)
+    !chat open       -> same as above
+    !chat list       -> list active DCC sessions
+    !chat close      -> close the caller's own DCC session (if any)
+    """
+    # use the same access flag you already used for chat (ex: '90')
+    if not self.check_command_access(channel, nick, host, '90', feedback):
+        return
+
+    sub = (msg or "").strip().split()
+    subcmd = (sub[0].lower() if sub else "open")
+
+    # Helper: check caller's session
+    key = nick.lower()
+    sess = self.dcc.sessions.get(key)
+    def _state(s):
+        if not s:
+            return "none"
+        if s.transport:
+            return "open"
+        # waiting/listening on a port after sending an offer (or fixed port listener)
+        if s.outbound_offer or s.listening_port or self.dcc.fixed_port:
+            return "waiting"
+        return "connecting"
+
+    # --- LIST ---
+    if subcmd in ("list", "ls"):
+        items = self.dcc.list_sessions()
+        if not items:
+            self.send_message(feedback, "(no DCC sessions)")
+            return
+        parts = []
+        for _, d in items.items():
+            parts.append(f"{d['nick']}[{d['state']}] {d['ip']}:{d['port']} age={d['age']}s idle={d['last']}s")
+        for line in self.split_irc_message_parts(parts, separator=" | "):
+            self.send_message(feedback, line)
+        return
+
+    # --- CLOSE (caller’s own session) ---
+    if subcmd in ("close", "end", "quit"):
+        if not sess:
+            self.send_message(feedback, "ℹ️ You don't have an active DCC chat.")
+            return
+        ok = self.dcc.close(nick)
+        self.send_message(feedback, "✅ DCC closed" if ok else "❌ Could not close DCC")
+        return
+
+    # --- OPEN (default) ---
+    if subcmd in ("open", "start") or not subcmd:
+        if sess:
+            self.send_message(
+                feedback,
+                f"ℹ️ You already have a DCC session ({_state(sess)}). "
+                f"Use {s.char}chat close to end it."
+            )
+            return
+        self.dcc.offer_chat(nick, feedback=feedback)
+        return
+
+    # --- HELP / unknown ---
+    self.send_message(
+        feedback,
+        f"Usage: {s.char}chat [open|list|close]  "
+        f"→ open (default), list active sessions, or close your DCC session."
+    )
 
 
 

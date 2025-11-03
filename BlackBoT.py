@@ -23,12 +23,15 @@ from core.sql_manager import SQLManager
 from core import seen
 from core.threading_utils import get_event
 from collections import OrderedDict
+from core.dcc import DCCManager
+
 import time
 import psutil
 from core.monitor_client import ensure_enrollment, send_heartbeat, send_monitor_offline
 import platform
 from twisted.internet.threads import deferToThread
 import threading
+
 
 _GLOBAL_WORKERS: dict[str, threading.Thread] = {}
 _GLOBAL_LOCK = threading.Lock()
@@ -92,6 +95,16 @@ class Bot(irc.IRCClient):
             self.port = getattr(self.factory, "port", None) or getattr(peer, "port", None)
         except Exception:
             pass
+
+        # DCC chat manager
+        self.dcc = DCCManager(
+            self,
+            public_ip=(getattr(s, "dcc_public_ip", "") or None),
+            fixed_port=getattr(s, "dcc_listen_port", None),
+            port_range=getattr(s, "dcc_port_range", (50000, 52000)),
+            idle_timeout=getattr(s, "dcc_idle_timeout", 600),
+            allow_unauthed=bool(getattr(s, "dcc_allow_unauthed", False)),
+        )
         self._init_worker_registry()
         self.monitorId = None
         self.version = _load_version()
@@ -417,11 +430,19 @@ class Bot(irc.IRCClient):
         self.connected = True
 
     def connectionLost(self, reason):
+
+        try:
+            if hasattr(self, "dcc"):
+                self.dcc.shutdown()
+        except Exception:
+            pass
+
         try:
             send_monitor_offline(self.monitorId, self.hmac_secret)
         except Exception:
             pass
         super().connectionLost(reason)
+
         self.connected = False
 
         self._stop_heartbeat_loop()
@@ -812,8 +833,25 @@ class Bot(irc.IRCClient):
             if message.startswith("\x01VERSION\x01"):
                 user = prefix.split('!')[0]
                 self.ctcpQuery_VERSION(user, message)
-            return
+                return
 
+            # Handle CTCP DCC CHAT offers
+            if message.startswith("\x01DCC "):
+                try:
+                    raw = message.strip("\x01").split()
+                    if len(raw) >= 5 and raw[1].upper() == "CHAT":
+                        _chat_word = raw[2].lower()
+                        ip_token = raw[3]
+                        port_token = raw[4]
+                        hostmask = f"{ident}@{host}"
+                        if not self.dcc.ensure_authed(nick, hostmask):
+                            self.send_message(nick, "⛔ DCC denied: not authenticated.")
+                            return
+                        self.dcc.accept_offer(nick, ip_token, int(port_token), feedback=nick)
+                        return
+                except Exception as e:
+                    self.send_message(nick, f"⚠️ Bad DCC offer: {e}")
+                    return
         if command == "RPL_WHOREPLY":
             wchannel = params[1]
             wident = params[2]
@@ -1096,6 +1134,21 @@ class Bot(irc.IRCClient):
                 self.send_message(feedback, f"🛠️ Execution error → {e}")
 
     def send_message(self, channel, message):
+        """
+        Dacă 'channel' este un nick și există o sesiune DCC activă cu el,
+        trimite direct în DCC. Altfel, ca înainte (PRIVMSG IRC / queue).
+        """
+        try:
+            if hasattr(self, "dcc") and channel and not channel.startswith("#"):
+                sess = self.dcc.sessions.get(channel.lower())
+                if sess and sess.transport:
+                    for part in self.split_irc_message_strings(message):
+                        sess.transport.send_text(part)
+                    return
+        except Exception:
+            pass
+
+        # fallback normal: trimite pe IRC
         for part in self.split_irc_message_strings(message):
             if part.strip():
                 self.message_queue.put((channel, part))
@@ -1201,29 +1254,67 @@ class Bot(irc.IRCClient):
         return found
 
     def get_hostname(self, nick, host, host_type):
-        # host poate fi "ident@host" SAU "nick!ident@host"
-        if "!" in host:
-            _, rest = host.split("!", 1)  # rest = "ident@host"
-        else:
-            rest = host
+        try:
+            raw = str(host or "").strip()
+            rest = raw.split("!", 1)[1] if "!" in raw else raw  # "ident@host" dacă era "nick!ident@host"
 
-        if "@" not in rest:
-            return "Invalid format type"
+            # --- helpers pentru upgrade ---
+            def _upgrade_from_dcc() -> str | None:
+                try:
+                    dcc = getattr(self, "dcc", None)
+                    if not dcc:
+                        return None
+                    sess = dcc.sessions.get(nick.lower())
+                    if not sess:
+                        return None
+                    hm = sess.meta.get("hostmask") or sess.meta.get("irc_host")
+                    if not hm:
+                        return None
+                    val = hm.split("!", 1)[1] if "!" in hm else hm
+                    return val if "@" in val and not val.endswith("@*") else None
+                except Exception:
+                    return None
 
-        ident, host_only = rest.split("@", 1)
+            def _upgrade_from_login() -> str | None:
+                try:
+                    for _, info in (getattr(self, "logged_in_users", {}) or {}).items():
+                        if (info.get("nick") or "").lower() == (nick or "").lower():
+                            hosts = info.get("hosts") or []
+                            if not hosts:
+                                continue
+                            raw = str(hosts[0])
+                            val = raw.split("!", 1)[1] if "!" in raw else raw
+                            return val if "@" in val and not val.endswith("@*") else None
+                except Exception:
+                    return None
 
-        formats = {
-            1: f"*!*@{host_only}",
-            2: f"*!{ident}@{host_only}",
-            3: f"{nick}!{ident}@{host_only}",
-            4: f"{nick}!*@*",
-            5: f"*!{ident}@*",
-        }
+            needs_upgrade = ("@" not in rest) or rest.endswith("@*") or rest == "*@*"
+            if needs_upgrade:
+                upgraded = _upgrade_from_dcc() or _upgrade_from_login()
+                if upgraded:
+                    rest = upgraded
 
-        if host_type > 0:
-            return formats.get(host_type, "Invalid format type")
-        else:
-            return formats.get(getattr(s, "default_hostname", 2), "Invalid format type")
+            # dacă tot e invalid, fabricăm minimul sigur
+            if "@" not in rest:
+                ident, host_only = "*", "*"
+            else:
+                ident, host_only = rest.split("@", 1)
+
+            formats = {
+                1: f"*!*@{host_only}",
+                2: f"*!{ident}@{host_only}",
+                3: f"{nick}!{ident}@{host_only}",
+                4: f"{nick}!*@*",
+                5: f"*!{ident}@*",
+            }
+            if host_type > 0 and host_type in formats:
+                return formats[host_type]
+            else:
+                default_type = getattr(s, "default_hostname", 2)
+                return formats.get(default_type, f"*!{ident}@{host_only}")
+
+        except Exception:
+            return "*!*@*"
 
     # channel privileges
     def user_is_voice(self, nick, chan):
@@ -1296,7 +1387,7 @@ class Bot(irc.IRCClient):
 
             # Reload all important modules
             modules_to_reload = [
-                'core.commands', 'core.update', 'core.SQL', 'core.Variables', 'settings', 'core.seen'
+                'core.commands', 'core.update', 'core.SQL', 'core.Variables', 'settings', 'core.seen', 'core.dcc'
             ]
             for mod_name in modules_to_reload:
                 mod = sys.modules.get(mod_name)

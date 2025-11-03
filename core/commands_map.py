@@ -1,5 +1,7 @@
 # commands_map.py
 
+import settings as s
+
 # ───────────────────────────────────────────────
 # Implemented commands with their configuration
 # ───────────────────────────────────────────────
@@ -154,5 +156,11 @@ command_definitions = [
                 '- Regex requires -regex; wildcard masks support * and ?.\n'
                 '- Realname matching supported when mask includes :realname (e.g., *!*@*:John Doe).',
     'flags': 'NnmMAO',
-    'id': '33'}
+    'id': '33'},
+    {'name': 'chat', "description": (
+            "DCC chat utilities.\n"
+            f"• {s.char}chat — open a DCC chat to you (alias: {s.char}chat open)\n"
+            f"• {s.char}chat list — list active DCC sessions\n"
+            f"• {s.char}chat close — close your own DCC session"
+        ), 'flags': 'NnMmA', 'id': '90'}
 ]

@@ -120,3 +120,27 @@ version = "BlackBoT: Python Edition"  # CTCP VERSION response
 # ───────────────────────────────────────────────
 
 monitor_status = True
+
+# ───────────────────────────────────────────────
+# DCC (Direct Client-to-Client) settings
+# ───────────────────────────────────────────────
+
+
+# If the bot is behind NAT, set your public IPv4 here.
+dcc_public_ip = ""
+
+
+# Use a single, fixed TCP port for DCC CHAT listening (recommended if you want to port‑forward once)
+dcc_listen_port = 51999 # choose any free TCP port and forward it if needed
+
+
+# If you prefer a range instead of a single port, leave dcc_listen_port=None and set this range:
+dcc_port_range = (50000, 52000)
+
+
+# Auto-close idle DCC sessions after N seconds
+dcc_idle_timeout = 600
+
+
+# Allow DCC chat with users who are NOT authenticated in the bot (not recommended)
+dcc_allow_unauthed = False
