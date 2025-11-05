@@ -1,5 +1,4 @@
 import time
-from core import update
 import settings as s
 from core import Variables as v
 import threading
@@ -8,6 +7,7 @@ from datetime import datetime
 from core.threading_utils import ThreadWorker
 import core.seen as seen
 import re, shlex
+import socket
 
 def cmd_ban(self, channel, feedback, nick, host, msg):
     """
@@ -1363,7 +1363,7 @@ def cmd_chat(self, channel, feedback, nick, host, msg):
     !chat close      -> close the caller's own DCC session (if any)
     """
     # use the same access flag you already used for chat (ex: '90')
-    if not self.check_command_access(channel, nick, host, '90', feedback):
+    if not self.check_command_access(channel, nick, host, '34', feedback):
         return
 
     sub = (msg or "").strip().split()
@@ -1422,6 +1422,275 @@ def cmd_chat(self, channel, feedback, nick, host, msg):
         f"Usage: {s.char}chat [open|list|close]  "
         f"→ open (default), list active sessions, or close your DCC session."
     )
+
+def _resolve_user_id(self, peer: str) -> int | None:
+    """
+    Resolve userId for 'peer' even if not logged in.
+    Try, in order:
+      1) handle-only lookup
+      2) channel-derived host (if visible)
+      3) generic hostmask stored in DB (e.g. *!*@IP)
+      4) sqlite_handle with generic peer!*@*
+    """
+    # 1) handle-only (most reliable if you know the account name)
+    uid = self.sql.sqlite_get_user_by_handle(self.botId, peer)
+    if uid:
+        return uid
+
+    # 2) if user is visible on a channel, use ident@host from WHO cache
+    try:
+        for row in getattr(self, "channel_details", []):
+            # row: [channel, nick, ident, host, privileges, realname, userId]
+            if row and len(row) >= 4 and (row[1] or "").lower() == peer.lower():
+                ident = row[2] or "*"
+                host  = row[3] or "*"
+                info = self.sql.sqlite_handle(self.botId, peer, f"{ident}@{host}")
+                if info:
+                    return info[0]
+                break
+    except Exception:
+        pass
+
+    # 3) try to reuse a stored raw hostmask from USERSHOSTS, if any
+    #    (common when your "info" shows *!*@IP)
+    possible_masks = [
+        f"{peer}!*@*",   # generic based on nick
+        "*!*@" + peer,   # if caller passes a raw host/ip as 'peer'
+    ]
+    for m in possible_masks:
+        try:
+            uid = self.sql.sqlite_get_user_by_hostmask(self.botId, m)
+            if uid:
+                return uid
+        except Exception:
+            pass
+
+    # 4) last resort: ask sqlite_handle with generic mask
+    try:
+        info = self.sql.sqlite_handle(self.botId, peer, f"{peer}!*@*")
+        if info:
+            return info[0]
+    except Exception:
+        pass
+
+    return None
+
+def cmd_botlink(self, channel, feedback, nick, host, msg):
+    if not self.check_command_access(channel, nick, host, '35', feedback):  # access pentru botlink
+        return
+
+    tokens = (msg or "").split()
+    if not tokens:
+        self.send_message(feedback, "Usage: !botlink add|del|list|connect|disconnect|msg ...")
+        return
+
+    action = tokens[0].lower()
+
+    # === ADD ===
+    if action == "add":
+        if len(tokens) < 4:
+            self.send_message(feedback, f"Usage: {s.char}botlink add <nick> <ip> <port>")
+            return
+
+        peer_name, ip, port_s = tokens[1], tokens[2], tokens[3]
+
+        # Validate IP
+        import ipaddress
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            self.send_message(feedback, "❌ Invalid IP address.")
+            return
+
+        # Validate port
+        try:
+            port = int(port_s)
+            if not (1 <= port <= 65535):
+                raise ValueError
+        except ValueError:
+            self.send_message(feedback, "❌ Invalid port (must be 1..65535).")
+            return
+
+        # Strict: user must already exist in DB by handle/username
+        user_id = self.sql.sqlite_get_user_id_by_name(self.botId, peer_name)
+        if not user_id:
+            self.send_message(feedback, f"❌ User '{peer_name}' does not exist in database.")
+            return
+
+        # Persist settings
+        self.sql.sqlite_update_user_setting(self.botId, user_id, "botlink", "1")
+        self.sql.sqlite_update_user_setting(self.botId, user_id, "botlink_ip", ip)
+        self.sql.sqlite_update_user_setting(self.botId, user_id, "botlink_port", str(port))
+
+        # Track peer for DCC manager (so connect/list works)
+        if hasattr(self, "dcc"):
+            self.dcc.add_link_peer(peer_name)
+
+        self.send_message(feedback, f"✅ '{peer_name}' added as botlink peer at {ip}:{port}.")
+        return
+
+
+    # === DELETE ===
+    elif action == "del":
+        if len(tokens) < 2:
+            self.send_message(feedback, f"Usage: {s.char}botlink del <nick>")
+            return
+
+        target_nick = tokens[1]
+        handle_info = self.sql.sqlite_handle(self.botId, target_nick, host)
+        if not handle_info:
+            self.send_message(feedback, f"❌ Cannot find user '{target_nick}' in DB.")
+            return
+
+        user_id = handle_info[0]
+        for setting in ("botlink", "botlink_ip", "botlink_port"):
+            self.sql.sqlite_update_user_setting(self.botId, user_id, setting, None)
+
+        self.send_message(feedback, f"🗑️ Removed botlink peer '{target_nick}'")
+        return
+
+    if action == "list":
+        # 1) Peer-ii marcați în DB (botlink=1)
+        rows = self.sql.sqlite_select("""
+                                      SELECT U.username
+                                      FROM USERS U
+                                               JOIN USERSSETTINGS S ON U.id = S.userId
+                                      WHERE S.botId = ?
+                                        AND S.setting = 'botlink'
+                                        AND S.settingValue = '1'
+                                      ORDER BY U.username COLLATE NOCASE
+                                      """, [self.botId]) or []
+
+        # colectăm linii frumoase + ne asigurăm că DCC știe de ei
+        pretty = []
+        for (uname,) in rows:
+            # înregistrează peer-ul și în DCC manager (pt connect ulterior)
+            if hasattr(self, "dcc"):
+                self.dcc.add_link_peer(uname)
+
+            uid = self.sql.sqlite_get_user_id_by_name(self.botId, uname)
+            settings = self.sql.sqlite_get_user_settings(self.botId, uid) if uid else {}
+            ip = (settings or {}).get("botlink_ip") or "?"
+            port = (settings or {}).get("botlink_port") or "?"
+
+            # status de link (din sesiuni)
+            sess = self.dcc.sessions.get(uname.lower()) if hasattr(self, "dcc") else None
+            if sess and getattr(sess, "transport", None):
+                icon = "🔗"
+                state = "open"
+            elif sess and (sess.outbound_offer or sess.listening_port or self.dcc.fixed_port):
+                icon = "⚠️"
+                state = "waiting"
+            else:
+                icon = "⛔"
+                state = "idle"
+
+            pretty.append(f"{icon} {uname} ({ip}:{port}) — {state}")
+
+        if pretty:
+            for part in self.split_irc_message_parts(
+                    ["Peers:\n" + "\n".join(pretty)], separator=""
+            ):
+                self.send_message(feedback, part)
+        else:
+            self.send_message(feedback, "Peers: (none)")
+
+        # 2) Sesiuni DCC curente (detaliu tehnic)
+        sessions = self.dcc.list_sessions() if hasattr(self, "dcc") else {}
+        if sessions:
+            parts = []
+            for _, d in sessions.items():
+                s_obj = self.dcc.sessions.get(d['nick'].lower()) if hasattr(self, "dcc") else None
+                is_bot = (s_obj and s_obj.meta.get("botlink") == "1")
+                bot_tag = " [BOT]" if is_bot else ""
+                parts.append(f"{d['nick']}{bot_tag}[{d['state']}] {d['ip']}:{d['port']} "
+                             f"age={d['age']}s idle={d['last']}s")
+            for line in self.split_irc_message_parts(parts, separator=" | "):
+                self.send_message(feedback, line)
+        else:
+            self.send_message(feedback, "(no DCC sessions)")
+        return
+
+    if action == "connect":
+        peer = tokens[1] if len(tokens) >= 2 else None
+
+        def _connect_one(p: str):
+            # ne asigurăm că e în lista de peers și avem endpoint în DB
+            self.dcc.add_link_peer(p)
+            has_ep = self.dcc.has_endpoint(p)
+
+            # trimitem oricum offer (standard DCC) – remote se poate conecta la noi
+            self.dcc.offer_chat(p, feedback=feedback)
+
+            # anti-stalemate:
+            # dacă sesiunea este "listening" și avem endpoint, forțăm un outbound TCP
+            state = self.dcc.session_state(p)
+            if state == "listening" and has_ep:
+                self.dcc.force_connect(p, feedback=feedback)
+
+        if peer:
+            if self.dcc._has_open_session(peer):
+                if feedback:
+                    try:
+                        self.send_message(feedback, f"🔗 Already connected to {peer}.")
+                    except Exception:
+                        pass
+                return True
+            _connect_one(peer)
+            self.send_message(feedback, f"🔗 Connecting to '{peer}' ...")
+        else:
+            peers = self.dcc.list_link_peers()
+            if not peers:
+                self.send_message(feedback, "ℹ️ No peers configured.")
+                return
+            for p in peers:
+                _connect_one(p)
+            self.send_message(feedback, "🔗 Connecting to all peers ...")
+        return
+
+    # === DISCONNECT ===
+    if action == "disconnect":
+        if not hasattr(self, "dcc"):
+            self.send_message(feedback, "❌ DCC manager not available.")
+            return
+        target = tokens[1] if len(tokens) >= 2 else None
+
+        def _purge_pending_for(p: str):
+            try:
+                self.dcc.pending_offers = [o for o in (self.dcc.pending_offers or []) if
+                                            (o.get("nick", "").lower() != p.lower())]
+            except Exception:
+                pass
+
+        def _disconnect_one(p: str):
+            had = p.lower() in (self.dcc.sessions or {})
+            ok = self.dcc.close(p)
+            _purge_pending_for(p)
+            if ok or had:
+                self.send_message(feedback, f"🔌 Disconnected from '{p}'.")
+            else:
+                self.send_message(feedback, f"ℹ️ Not connected to '{p}'.")
+
+        if not target or target.lower() in ("all", "*"):
+            peers_set = {x.lower() for x in (self.dcc.list_link_peers() or [])}
+            names = []
+            for key, sess in list(self.dcc.sessions.items()):
+                if not sess:
+                    continue
+                if sess.meta.get("botlink") == "1" or key in peers_set:
+                        names.append(sess.peer_nick)
+            if not names:
+                self.send_message(feedback, "ℹ️ No botlink sessions to disconnect.")
+                return
+            for p in names:
+                _disconnect_one(p)
+            self.send_message(feedback, f"✅ Disconnected {len(names)} session(s).")
+        else:
+            _disconnect_one(target)
+        return
+
+    else:
+            self.send_message(feedback, f"Usage: {s.char}botlink add|del|list|connect|disconnect")
 
 
 

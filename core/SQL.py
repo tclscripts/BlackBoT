@@ -229,28 +229,50 @@ class SQL:
         return None
 
     def sqlite_update_user_setting(self, botId, userId, setting, value):
-        # Verificăm dacă setarea există deja
-        select_query = """
-            SELECT 1 FROM USERSSETTINGS
-            WHERE botId = ? AND userId = ? AND setting = ?
         """
+        Adaugă, actualizează sau șterge o setare din USERSSETTINGS:
+          - Dacă value este None → șterge setarea complet.
+          - Dacă există deja → UPDATE.
+          - Dacă nu există → INSERT.
+        """
+        # Dacă value este None => ștergere
+        if value is None:
+            delete_query = """
+                           DELETE \
+                           FROM USERSSETTINGS
+                           WHERE botId = ? \
+                             AND userId = ? \
+                             AND setting = ? \
+                           """
+            self.sqlite3_insert(delete_query, [botId, userId, setting])
+            return True
+
+        # Verificăm dacă există deja o înregistrare
+        select_query = """
+                       SELECT 1 \
+                       FROM USERSSETTINGS
+                       WHERE botId = ? \
+                         AND userId = ? \
+                         AND setting = ? \
+                       """
         exists = self.sqlite_select(select_query, [botId, userId, setting])
 
         if exists:
-            # Dacă există, facem UPDATE
             update_query = """
-                UPDATE USERSSETTINGS
-                SET settingValue = ?
-                WHERE botId = ? AND userId = ? AND setting = ?
-            """
+                           UPDATE USERSSETTINGS
+                           SET settingValue = ?
+                           WHERE botId = ? \
+                             AND userId = ? \
+                             AND setting = ? \
+                           """
             self.sqlite3_insert(update_query, [value, botId, userId, setting])
         else:
-            # Dacă nu există, facem INSERT
             insert_query = """
-                INSERT INTO USERSSETTINGS (botId, userId, setting, settingValue)
-                VALUES (?, ?, ?, ?)
-            """
+                           INSERT INTO USERSSETTINGS (botId, userId, setting, settingValue)
+                           VALUES (?, ?, ?, ?) \
+                           """
             self.sqlite3_insert(insert_query, [botId, userId, setting, value])
+        return True
 
     # get userId by name
     def sqlite_get_user_id_by_name(self, botId, username):
@@ -638,6 +660,33 @@ class SQL:
             WHERE ga.botId = ? AND va.accessFlag = ?
         """
         return [row[0] for row in self.sqlite_select(query, (botId, flag))]
+
+    def sqlite_get_user_by_handle(self, botId, handle):
+        """
+        Return userId for a given handle (account name) regardless of host, or None.
+        """
+        rows = self.sqlite_select(
+            "SELECT id FROM USERS WHERE botId = ? AND username = ? LIMIT 1",
+            [botId, handle]
+        )
+        if rows:
+            r = rows[0]
+            return r[0] if isinstance(r, (list, tuple)) else r
+        return None
+
+    def sqlite_get_user_by_hostmask(self, botId, hostmask):
+        """
+        Return userId owning an exact hostmask entry (e.g. *!*@193.226.56.130) from USERSHOSTS.
+        Adjust table/column names if yours differ.
+        """
+        rows = self.sqlite_select(
+            "SELECT userId FROM USERSHOSTS WHERE botId = ? AND host = ? LIMIT 1",
+            [botId, hostmask]
+        )
+        if rows:
+            r = rows[0]
+            return r[0] if isinstance(r, (list, tuple)) else r
+        return None
 
     def sqlite_add_channel_access(self, botId, channel, userId, accessId, addedBy):
         chan_id_query = "SELECT id FROM CHANNELS WHERE botId = ? AND channelName COLLATE NOCASE = ?"

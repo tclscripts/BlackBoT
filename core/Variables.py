@@ -79,4 +79,4 @@ settings = [
 users_settings = ['lastseen', 'lastSeenOn']
 
 # Users settings allowed to be changed
-users_settings_change = ['email', 'greet', 'autologin']
+users_settings_change = ['email', 'greet', 'autologin', 'botlink', 'botlink_ip', 'botlink_port']

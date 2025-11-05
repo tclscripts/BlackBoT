@@ -22,6 +22,20 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
+try:
+    lvl = getattr(__import__("settings"), "update_log_level", "INFO")
+    if isinstance(lvl, str) and lvl.strip():
+        logger.setLevel(getattr(logging, lvl.upper(), logging.INFO))
+        logger.disabled = False
+    else:
+        # Silence this logger without affecting root/other loggers
+        logger.setLevel(logging.CRITICAL)
+        logger.disabled = True
+except Exception:
+    # Safe default
+    logger.setLevel(logging.INFO)
+    logger.disabled = False
+
 GITHUB_REPO = "https://github.com/tclscripts/BlackBoT"
 BRANCH = "main"
 VERSION_FILE = "VERSION"

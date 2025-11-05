@@ -3,6 +3,7 @@ import settings as s
 
 CRED_PATH = os.getenv("BLACKBOT_CRED", "./files/cred.json")
 
+
 def _read_creds():
     try:
         with open(CRED_PATH, "r", encoding="utf-8") as f:
@@ -10,8 +11,9 @@ def _read_creds():
         if not data.get("bot_id") or not data.get("hmac_secret"):
             return None
         return data
-    except Exception as e:
+    except Exception:
         return None
+
 
 def _write_creds(data: dict):
     d = os.path.dirname(CRED_PATH)
@@ -26,18 +28,21 @@ def _write_creds(data: dict):
     except Exception:
         pass
 
+
 def _api_base():
-    # Kill-switch global din mediu: dacă e setat, monitorul este dezactivat complet.
-    if not s.monitor_status:
+    """
+    Global kill-switch: if monitor_status is False, disable all monitor calls.
+    """
+    if not getattr(s, "monitor_status", False):
         return None
-    base = "http://87.106.56.156:8000"
-    return base
+    return "http://87.106.56.156:8000"
+
 
 def _machine_fingerprint() -> str:
     parts = []
     try:
         if os.path.exists("/etc/machine-id"):
-            parts.append(open("/etc/machine-id","r").read().strip())
+            parts.append(open("/etc/machine-id", "r").read().strip())
     except Exception:
         pass
     try:
@@ -52,7 +57,12 @@ def _machine_fingerprint() -> str:
     fp = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return fp
 
+
 def ensure_enrollment(nickname: str, version: str, server_str: str) -> dict | None:
+    """
+    Returns credentials dict with bot_id & hmac_secret, or None if enrollment
+    is disabled or not yet provisioned.
+    """
     base = _api_base()
     if not base:
         return None
@@ -72,36 +82,65 @@ def ensure_enrollment(nickname: str, version: str, server_str: str) -> dict | No
 
     try:
         r = requests.post(f"{base.rstrip('/')}/api/request_enroll", json=payload, timeout=10)
-    except Exception as e:
+    except Exception:
         return None
 
     if r.status_code == 200:
-        data = r.json()
-        creds = {"bot_id": data["bot_id"], "hmac_secret": data["hmac_secret"]}
-        _write_creds(creds)
-        return creds
+        try:
+            data = r.json()
+        except Exception:
+            return None
+        bot_id = data.get("bot_id")
+        hmac_secret = data.get("hmac_secret")
+        if bot_id and hmac_secret:
+            creds = {"bot_id": bot_id, "hmac_secret": hmac_secret}
+            _write_creds(creds)
+            return creds
+        return None
     elif r.status_code in (201, 202):
+        # Pending or accepted; no credentials yet.
         return None
     else:
         return None
 
-def send_monitor_offline(bot_id: str, hmac_secret: str) -> bool:
-    base = _api_base()
-    if not base:
-        return False
-    url = f"{base.rstrip('/')}/api/offline"
-    payload = {"bot_id": bot_id}
+
+def _build_headers_and_body(hmac_secret: str | None, payload: dict):
+    """
+    Returns (headers, body) or (None, None) if secret is missing.
+    """
+    if not hmac_secret:
+        return None, None
+
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    token = os.getenv("MONITOR_TOKEN", "7CWwLTDh6ReQLY7rEe2fk5BvBvEeAg3pF6MqhphewjREsMgLLXDVavlY1VI6o3Lc")
     ts = str(time.time())
     sig = hmac.new(hmac_secret.encode("utf-8"), body + ts.encode("utf-8"), hashlib.sha256).hexdigest()
 
+    token = os.getenv(
+        "MONITOR_TOKEN",
+        "7CWwLTDh6ReQLY7rEe2fk5BvBvEeAg3pF6MqhphewjREsMgLLXDVavlY1VI6o3Lc",
+    )
     headers = {
         "Authorization": f"Bearer {token}",
         "X-Timestamp": ts,
         "X-Signature": f"sha256={sig}",
         "Content-Type": "application/json",
     }
+    return headers, body
+
+
+def send_monitor_offline(bot_id: str | None, hmac_secret: str | None) -> bool:
+    """
+    Safe: silently no-ops if disabled or creds missing.
+    """
+    base = _api_base()
+    if not base or not bot_id or not hmac_secret:
+        return False
+
+    url = f"{base.rstrip('/')}/api/offline"
+    payload = {"bot_id": bot_id}
+    headers, body = _build_headers_and_body(hmac_secret, payload)
+    if headers is None:
+        return False
 
     try:
         resp = requests.post(url, headers=headers, data=body, timeout=5)
@@ -109,35 +148,25 @@ def send_monitor_offline(bot_id: str, hmac_secret: str) -> bool:
     except requests.RequestException:
         return False
 
-def send_heartbeat(bot_id: str, hmac_secret: str, payload: dict) -> bool:
+
+def send_heartbeat(bot_id: str | None, hmac_secret: str | None, payload: dict) -> bool:
+    """
+    Safe: silently no-ops if disabled or creds missing.
+    """
     base = _api_base()
-    if not base:
+    if not base or not bot_id or not hmac_secret:
         return False
 
     url = f"{base.rstrip('/')}/api/heartbeat"
-
     full_payload = dict(payload)
     full_payload.setdefault("bot_id", bot_id)
 
-    body = json.dumps(full_payload, separators=(",", ":")).encode("utf-8")
-    ts = str(time.time())
-    sig = hmac.new(hmac_secret.encode("utf-8"), body + ts.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    token = os.getenv("MONITOR_TOKEN", "7CWwLTDh6ReQLY7rEe2fk5BvBvEeAg3pF6MqhphewjREsMgLLXDVavlY1VI6o3Lc")
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "X-Timestamp": ts,
-        "X-Signature": f"sha256={sig}",
-        "Content-Type": "application/json",
-    }
+    headers, body = _build_headers_and_body(hmac_secret, full_payload)
+    if headers is None:
+        return False
 
     try:
         r = requests.post(url, data=body, headers=headers, timeout=5)
-        if r.status_code == 200:
-            return True
-        else:
-            return False
-    except Exception as e:
+        return r.status_code == 200
+    except requests.RequestException:
         return False
-
-

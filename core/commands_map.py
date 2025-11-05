@@ -162,5 +162,18 @@ command_definitions = [
             f"• {s.char}chat — open a DCC chat to you (alias: {s.char}chat open)\n"
             f"• {s.char}chat list — list active DCC sessions\n"
             f"• {s.char}chat close — close your own DCC session"
-        ), 'flags': 'NnMmA', 'id': '90'}
+        ), 'flags': 'NnMmA', 'id': '34'},
+{
+    "id": "35",
+    "name": "botlink",
+    "flags": "Nn",
+    "description": (
+        "Manage bot-to-bot DCC links.\n"
+        f"• {s.char}botlink add <nick>          – mark user as a bot peer (USERSSETTINGS.botlink=1) and schedule auto-connect\n"
+        f"• {s.char}botlink del <nick>          – unmark and remove from auto-connect\n"
+        f"• {s.char}botlink list                – list peers + DCC sessions (tagged [BOT] if linked)\n"
+        f"• {s.char}botlink connect [nick]      – force connect to peer (or all if omitted)\n"
+        f"• {s.char}botlink disconnect [nick]   – close DCC with peer (or all)\n"
+    ),
+}
 ]

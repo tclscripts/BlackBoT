@@ -122,25 +122,50 @@ version = "BlackBoT: Python Edition"  # CTCP VERSION response
 monitor_status = True
 
 # ───────────────────────────────────────────────
-# DCC (Direct Client-to-Client) settings
+# DCC / BotLink Settings
 # ───────────────────────────────────────────────
 
-
-# If the bot is behind NAT, set your public IPv4 here.
+# If the bot is behind NAT, set your public IPv4 address here.
+# Leave empty ("") to auto-detect it (uses sourceIP or a UDP probe).
+# Example: "203.0.113.42"
 dcc_public_ip = ""
 
+# A single, fixed TCP port for DCC CHAT listening.
+# Recommended if you want to open or forward only one port in your router/firewall.
+# If set to None, the bot will use a random port from dcc_port_range instead.
+dcc_listen_port = 51999  # choose any free TCP port and forward it if needed
 
-# Use a single, fixed TCP port for DCC CHAT listening (recommended if you want to port‑forward once)
-dcc_listen_port = 51999 # choose any free TCP port and forward it if needed
-
-
-# If you prefer a range instead of a single port, leave dcc_listen_port=None and set this range:
+# Range of ports to use if dcc_listen_port is None.
+# Useful if your network allows multiple ephemeral ports instead of a single one.
 dcc_port_range = (50000, 52000)
 
-
-# Auto-close idle DCC sessions after N seconds
+# Automatically close idle DCC sessions after N seconds.
+# This helps clean up stale or inactive connections.
 dcc_idle_timeout = 600
 
-
-# Allow DCC chat with users who are NOT authenticated in the bot (not recommended)
+# Allow DCC chat with unauthenticated users.
+# Not recommended for production bots, as it allows anyone to open a DCC session.
 dcc_allow_unauthed = False
+
+# Logging level for the DCC system ("DEBUG", "INFO", "WARNING", "ERROR", or None).
+dcc_log_level = None
+
+# ───────────────────────────────────────────────
+# BotLink Auto-Connect Settings
+# ───────────────────────────────────────────────
+
+# If True, all DCCManager instances share a single global worker thread
+# that automatically maintains botlink connections (recommended).
+botlink_autoconnect_global = True
+
+# Interval (in seconds) between automatic botlink maintenance cycles.
+# The bot will periodically refresh the botlink peers list, send keepalives,
+# and attempt reconnects for disconnected peers.
+botlink_autoconnect_interval = 30
+
+# ───────────────────────────────────────────────
+# Updater logging
+# ───────────────────────────────────────────────
+# String level: "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL"
+# Set to None (or empty string) to silence updater logs.
+update_log_level = None

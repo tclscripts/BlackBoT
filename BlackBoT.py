@@ -33,6 +33,7 @@ from twisted.internet.threads import deferToThread
 import threading
 
 
+
 _GLOBAL_WORKERS: dict[str, threading.Thread] = {}
 _GLOBAL_LOCK = threading.Lock()
 
@@ -96,15 +97,6 @@ class Bot(irc.IRCClient):
         except Exception:
             pass
 
-        # DCC chat manager
-        self.dcc = DCCManager(
-            self,
-            public_ip=(getattr(s, "dcc_public_ip", "") or None),
-            fixed_port=getattr(s, "dcc_listen_port", None),
-            port_range=getattr(s, "dcc_port_range", (50000, 52000)),
-            idle_timeout=getattr(s, "dcc_idle_timeout", 600),
-            allow_unauthed=bool(getattr(s, "dcc_allow_unauthed", False)),
-        )
         self._init_worker_registry()
         self.monitorId = None
         self.version = _load_version()
@@ -173,6 +165,16 @@ class Bot(irc.IRCClient):
         reactor.addSystemEventTrigger(
             'before', 'shutdown',
             partial(send_monitor_offline, self.monitorId, self.hmac_secret)
+        )
+
+        # DCC chat manager
+        self.dcc = DCCManager(
+            self,
+            public_ip=(getattr(s, "dcc_public_ip", "") or None),
+            fixed_port=getattr(s, "dcc_listen_port", None),
+            port_range=getattr(s, "dcc_port_range", (50000, 52000)),
+            idle_timeout=getattr(s, "dcc_idle_timeout", 600),
+            allow_unauthed=bool(getattr(s, "dcc_allow_unauthed", False)),
         )
 
     def _init_worker_registry(self):
