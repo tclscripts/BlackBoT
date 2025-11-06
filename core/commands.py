@@ -1336,19 +1336,41 @@ def cmd_info(self, channel, feedback, nick, host, msg):
 
     added_str = datetime.fromtimestamp(added_time).strftime('%Y-%m-%d %H:%M:%S') if added_time else "Unknown"
     login_status = "🟢 Logged in" if self.is_logged_in(userId, thost_mask) else "🔴 Not logged in"
+
+    # --- NEW: BotLink status (doar dacă userul e configurat drept peer botlink) ---
+    botlink_tag = ""
+    try:
+        is_peer = False
+        # 1) din setările din DB (botlink=1/true)
+        if user_settings:
+            val = str(user_settings.get("botlink", "0")).strip().lower()
+            is_peer = val in ("1", "true", "yes")
+        # 2) sau din allowlist-ul DCC (runtime)
+        if hasattr(self, "dcc") and self.dcc and self.dcc._is_botlink_user(username):
+            is_peer = True
+
+        if is_peer and hasattr(self, "dcc") and self.dcc:
+            sess = self.dcc.sessions.get(username.lower())
+            linked = bool(sess and getattr(sess, "transport", None))
+            botlink_tag = f" | {'🔗 Linked' if linked else '⛓️ Not linked'}"
+    except Exception:
+        # nu stricăm comanda dacă ceva e în neregulă
+        pass
+    # --- END NEW ---
+
     host_list = ', '.join(hosts) if hosts else "None"
     last_login = max((ts for _, _, ts in logins), default=None)
     last_login_str = last_login if last_login else "Never"
     global_str = f"{global_flag}" if global_flag else "N/A"
     local_str = f"{local_flag}" if local_flag else "N/A"
 
-    settings_str = '\n'.join([f"➤ {k}: {v}" for k, v in user_settings.items()]) if user_settings else "None"
+    settings_str = '\n'.join([f"➤ {k}: {v}" for k, v in (user_settings or {}).items()]) if user_settings else "None"
 
     added_by, last_modified_by = self.sql.sqlite_get_user_audit(self.botId, userId)
 
     self.send_message(feedback, f"👤 Info for user `{username}`:\n"
                                 f"➤ Added on: {added_str}\n"
-                                f"➤ Status: {login_status}\n"
+                                f"➤ Status: {login_status}{botlink_tag}\n"
                                 f"➤ Hosts: {host_list}\n"
                                 f"➤ Logins: {len(logins)}, last: {last_login_str}\n"
                                 f"➤ Access - Global: {global_str}, Local on {channel}: {local_str}\n"
@@ -1481,7 +1503,7 @@ def cmd_botlink(self, channel, feedback, nick, host, msg):
 
     tokens = (msg or "").split()
     if not tokens:
-        self.send_message(feedback, "Usage: !botlink add|del|list|connect|disconnect|msg ...")
+        self.send_message(feedback, f"Usage: {s.char}botlink add|del|list|connect|disconnect")
         return
 
     action = tokens[0].lower()
@@ -1687,10 +1709,11 @@ def cmd_botlink(self, channel, feedback, nick, host, msg):
             self.send_message(feedback, f"✅ Disconnected {len(names)} session(s).")
         else:
             _disconnect_one(target)
-        return
+        return None
 
     else:
             self.send_message(feedback, f"Usage: {s.char}botlink add|del|list|connect|disconnect")
+            return None
 
 
 
