@@ -466,6 +466,7 @@ class Bot(irc.IRCClient):
         ident, host = self._get_any_ident_host(nick)
         seen.on_quit(self.sql, self.botId, nick, message, ident=ident, host=host)
 
+
     def signedOn(self):
         logger.info("Signed on to the server")
         # load commands

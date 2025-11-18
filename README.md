@@ -1,100 +1,258 @@
-# 🤖 BlackBoT
+# 🤖 BlackBoT – Modern IRC Bot with Multi‑Instance Manager
 
-**BlackBoT** is a powerful and modular IRC bot built with Python and Twisted, featuring channel moderation, user authentication, role-based access control, and automatic update support via GitHub.
-
-📣 BlackBoT Best Connect Time Contest
-Check out https://uptime.tclscripts.net to monitor your bot’s status and track your performance.
-
---
-
-> ⚠️ This project is currently in progress and may contain bugs or unfinished features.
+Welcome to **BlackBoT**, a modular, modern, multi‑instance capable IRC bot written in Python.
+This README is designed in a clean, developer‑friendly **GitHub style with emojis** for clarity and fast navigation.
 
 ---
 
-## 📦 Features
+## 🚀 Features
 
-- Multi-server support with automatic failover  
-- User authentication system with password hashing  
-- Role-based permissions with per-channel and global flags  
-- Channel management: op, voice, kick, join/leave  
-- Auto-update from GitHub with setting preservation  
-- SQLite database backend for persistent user and channel data  
-- Modular command architecture  
-- Threaded workers with stop/reset for background tasks  
-- Advanced status reporting (CPU, RAM, threads, uptime, system info)  
-- CTCP support (VERSION reply)  
-- Flexible hostmask formats for user management  
-- Caching with TTL and memory limits  
-- Extensible module system (e.g., YouTube fetcher)  
-- Cross-platform support (Linux/Windows) 
+* 🔥 **Multi‑Instance Manager** (create, start, stop, edit, delete bots)
+* 📦 **Per‑instance environment configuration** (`.env`)
+* 🔐 **NickServ authentication** (with optional ident requirement)
+* 🛡️ **SSL/TLS support** (server TLS + optional client certificates)
+* 🧠 **Auto‑update system**
+* 🚓 **Flood protection**
+* 🎚️ **Per‑instance logging**
+* 🧵 **ThreadWorker supervisor** (safe background workers)
+* 📡 **DCC support**
+* 🔄 **BotLink system** (inter‑bot communication)
+* 🧩 **Modular command system** (channel + PM commands)
 
 ---
 
-## 🚀 Getting Started
+## 📁 Project Structure
+
+```
+BlackBoT/
+│── Manager.py          # Multi‑Instance controller
+│── Launcher.py         # Environment + dependency setup
+│── BlackBoT.py         # Core bot runtime
+│── environment_config.py
+│── commands.py
+│── SQL.py
+│── ...
+│
+└── instances/
+    └── <InstanceName>/
+        ├── .env        # Per‑bot configuration
+        ├── logs/       # Per‑bot logs
+        ├── data/       # Credentials + misc
+        ├── <bot>.db    # SQLite user/channel DB
+        └── <bot>.pid   # Runtime process PID
+```
+
+---
+
+# 🧩 Installation
+
+## 1️⃣ Clone Repository
 
 ```bash
-Clone the repository:
-
-git clone https://github.com/tclscripts/BlackBoT.git
+git clone https://github.com/<username>/BlackBoT.git
 cd BlackBoT
+```
 
-Edit the configuration file:
-nano settings.py
+## 2️⃣ Run Launcher (auto‑setup)
 
-Use the Bash script (Linux)
-  - The repo also includes a helper script BlackBoT_RuN.sh which:
-  - Creates a virtual environment
-  - Installs the required Python packages
-  - Starts the bot automatically
+```bash
+python3 Launcher.py
+```
 
-Run it as:
-bash BlackBoT_RuN.sh
+This will:
 
-Requirements
-Python 3.8+
-Linux or Windows (Linux recommended for BlackBoT_RuN.sh for Windows)
-Internet connection (for auto-update and external modules)
+* create a virtual environment
+* install all dependencies
+* validate the installation
 
-Dependencies are listed in requirements.txt and will be installed automatically if you use the Bash script.
+---
+
+# 🛠 Creating Your First Bot Instance
+
+Run the multi‑instance manager:
+
+```bash
+python3 Manager.py
+```
+
+Then choose:
+
+```
+1. Create new instance
+```
+
+You will be prompted for:
+
+* bot nickname
+* username + realname
+* IRC servers
+* SSL/TLS settings
+* channel list
+* NickServ credentials
+* log level
+* auto‑start preferences
+
+When finished, your instance will appear as:
+
+```
+instances/<Name>/.env
 ```
 
 ---
 
-## 🆘 The !help Command
+# ⚙️ `.env` Configuration (Modern Format)
 
-The !help command is your gateway to discovering what BlackBoT can do.
+Each bot has its own `.env` file. Example:
 
-Dynamic filtering: Shows only commands you have access to (public, local per-channel, or global).
+```env
+# Identity
+BLACKBOT_NICKNAME=Legion
+BLACKBOT_USERNAME=Legion
+BLACKBOT_REALNAME="BlackBoT"
+BLACKBOT_AWAY="No Away"
+BLACKBOT_ALTNICK=Legion_
 
-Usage examples:
-``` 
-!help                  → Lists all accessible commands
-!help say              → Shows details about the "say" command
-!help #channel         → In PM, lists local commands for that channel
+# Servers + TLS
+BLACKBOT_SERVERS=irc.libera.chat:6697
+BLACKBOT_PORT=6697
+BLACKBOT_SSL_USE=true
+BLACKBOT_SSL_CERT_FILE=
+BLACKBOT_SSL_KEY_FILE=
 
-Detailed descriptions: Each command can provide multi-line usage and notes.
-``` 
-## 📂 File Structure
-``` 
-  BlackBoT/
-├── core/                      # Core package with internal logic
-│   ├── commands.py            # Implementation of commands (auth, access, uptime, etc.)
-│   ├── commands_map.py        # Command mapping to IDs, flags, and descriptions
-│   ├── log.py                 # Logging module
-│   ├── monitor_client.py      # Background monitor for uptime and stats
-│   ├── seen.py                # "Seen" system: tracks last activity and stats
-│   ├── SQL.py                 # SQLite wrapper (connections, queries, WAL mode)
-│   ├── sql_manager.py         # SQL manager singleton (initializes DB and tables)
-│   ├── threading_utils.py     # ThreadWorker with stop/reset and global events
-│   ├── update.py              # Auto-update mechanism from GitHub
-│   └── Variables.py           # Global variables: roles, settings, access lists
-│
-├── BlackBoT.py                # Main bot implementation (Twisted IRCClient)
-├── BlackBoT_RuN.sh            # Bash script for setup and running on Linux
-├── Starter.py                 # Python entry point for launching the bot
-├── settings.py                # Bot configuration (server, nick, passwords, etc.)
-├── requirements.txt           # Python dependencies
-├── VERSION                    # Current version file
-└── changes                    # Changelog for updates
+# Channels
+BLACKBOT_CHANNELS=#MyChannel,#MyOtherChannel
+
+# NickServ
+BLACKBOT_NICKSERV_ENABLED=true
+BLACKBOT_NICKSERV_PASSWORD=secretpass
+BLACKBOT_REQUIRE_NICKSERV_IDENT=false
+
+# Performance
+BLACKBOT_MESSAGE_DELAY=1.5
+
+# Auto-Logout (mins)
+BLACKBOT_AUTO_DEAUTH_TIME=30
 ```
 
+Every variable beginning with `BLACKBOT_` is automatically parsed into the bot via `environment_config.py`.
+
+---
+
+# ▶️ Running Bots
+
+## Start all instances
+
+```bash
+python3 Manager.py start
+```
+
+## Start one instance
+
+```bash
+python3 Manager.py start <InstanceName>
+```
+
+## Stop an instance
+
+```bash
+python3 Manager.py stop <InstanceName>
+```
+
+Supports:
+
+* graceful SIGTERM
+* forced SIGKILL
+* process‑group kill on Linux
+
+## Restart instance
+
+```bash
+python3 Manager.py restart <InstanceName>
+```
+
+---
+
+# 📝 Editing Configurations
+
+### Edit `.env` via Manager
+
+```
+Advanced → Edit instance configuration
+```
+
+This opens the instance's `.env` with your system editor.
+
+### Browse instance files
+
+```
+Advanced → Browse instance files
+```
+
+---
+
+# 🔐 NickServ Behavior
+
+* If `BLACKBOT_NICKSERV_ENABLED=true` → bot logs in using `/msg NickServ IDENTIFY`.
+* If `BLACKBOT_REQUIRE_NICKSERV_IDENT=true` → bot **waits** for identification before joining channels.
+
+Set to false if the network language differs from English.
+
+```env
+BLACKBOT_REQUIRE_NICKSERV_IDENT=false
+```
+
+---
+
+# 📡 Channel Join Logic
+
+On first run (**empty DB**):
+
+* joins channels from `.env` → `BLACKBOT_CHANNELS`
+
+On later runs:
+
+* loads channels from SQLite DB (`CHANNELS` table)
+
+If no channels exist in DB but you want to force `.env`:
+
+```bash
+rm instances/<Name>/<Name>.db*
+```
+
+Bot becomes "new" again.
+
+---
+
+# 🔐 Auto-Logout System
+
+A background worker monitors logged-in users.
+
+---
+
+# 🧵 Worker System
+
+BlackBoT uses a custom **ThreadWorker** implementation with:
+
+* supervised child threads
+* heartbeat pings
+* auto-restart on freeze
+* stoppable via `stop_event`
+
+Used for:
+
+* bcrypt offloading
+* login session monitoring
+* auto-update polling
+
+---
+
+# ❤️ Contribute & Support
+
+Pull requests and enhancements are welcome!
+For feature requests or help, open an issue on GitHub.
+
+---
+
+# 📜 License
+
+MIT License – feel free to use, modify, and distribute.
