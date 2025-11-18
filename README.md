@@ -1,7 +1,7 @@
 # 🤖 BlackBoT – Modern IRC Bot with Multi‑Instance Manager
 
 Welcome to **BlackBoT**, a modular, modern, multi‑instance capable IRC bot written in Python.
-This README is designed in a clean, developer‑friendly **GitHub style with emojis** for clarity and fast navigation.
+Check https://uptime.tclscripts.net for BoT Uptime Contest
 
 ---
 
@@ -49,7 +49,7 @@ BlackBoT/
 ## 1️⃣ Clone Repository
 
 ```bash
-git clone https://github.com/<username>/BlackBoT.git
+git clone https://github.com/tclscripts/BlackBoT.git
 cd BlackBoT
 ```
 
