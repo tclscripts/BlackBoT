@@ -116,9 +116,9 @@ def _kill_process(pid, force=False):
 
     else:
         if force:
-            os.kill(pid, signal.SIGKILL)
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
         else:
-            os.kill(pid, signal.SIGTERM)
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
 
 
 class UnifiedBlackBotManager:
@@ -906,17 +906,14 @@ BLACKBOT_MANAGER_VERSION="Unified Manager 2.0"
                         )
                         print_info(f"Sent termination signal to '{name}'")
 
-                        # 2) așteptăm puțin
                         time.sleep(2)
 
-                        # 3) verificăm dacă procesul încă e în viață
                         check = subprocess.run(
                             ["tasklist", "/FI", f"PID eq {pid}"],
                             capture_output=True,
                             text=True,
                         )
                         if str(pid) in (check.stdout or ""):
-                            # încă trăiește -> forțăm
                             print_warning(f"Instance '{name}' didn't terminate gracefully, force killing...")
                             subprocess.run(
                                 ["taskkill", "/PID", str(pid), "/F", "/T"],
@@ -930,6 +927,46 @@ BLACKBOT_MANAGER_VERSION="Unified Manager 2.0"
                     print_error(f"Failed to stop instance '{name}' via taskkill: {e}")
                     return False
 
+            else:
+                # 🔹 Linux / macOS: folosim kill / killpg
+                try:
+                    import psutil
+
+                    # alegem semnalul
+                    sig = signal.SIGKILL if force else signal.SIGTERM
+
+                    # încercăm să luăm PGID (process group id)
+                    try:
+                        pgid = os.getpgid(pid)
+                    except Exception:
+                        pgid = None
+
+                    if pgid and pgid > 1:
+                        # omorâm întregul group (bot + copii)
+                        os.killpg(pgid, sig)
+                    else:
+                        # fallback: doar procesul
+                        os.kill(pid, sig)
+
+                    if not force:
+                        # așteptăm puțin și, dacă încă trăiește, dăm KILL
+                        time.sleep(2)
+                        if psutil.pid_exists(pid):
+                            print_warning(f"Instance '{name}' didn't terminate gracefully, force killing...")
+                            try:
+                                if pgid and pgid > 1:
+                                    os.killpg(pgid, signal.SIGKILL)
+                                else:
+                                    os.kill(pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+
+                    # dacă am ajuns aici, am trimis semnalele de stop
+                    print_success(f"Stop signal sent to instance '{name}'")
+
+                except Exception as e:
+                    print_error(f"Failed to stop instance '{name}' on POSIX: {e}")
+                    return False
 
         except (ValueError, OSError, ProcessLookupError) as e:
             print_error(f"Failed to stop instance '{name}': {e}")
