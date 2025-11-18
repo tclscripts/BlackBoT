@@ -767,15 +767,24 @@ class Bot(irc.IRCClient):
         full_interval = max(1, int(3600 * getattr(s, "autoDeauthTime", 1)))
         try:
             while not stop_event.is_set():
-                beat()  # ✅ heartbeat către supraveghetor
+                beat()
+
                 if not self.logged_in_users:
                     logger.info("✅ No more logged-in users. Monitor thread exiting.")
                     self.thread_check_logged_users_started = False
                     break
+
+                if not getattr(self, "channels", None):
+                    logger.debug("ℹ️ No joined channels; skipping logged_users cleanup this cycle.")
+                    if stop_event.wait(min(full_interval, 30)):
+                        break
+                    continue
+
                 try:
                     self.clean_logged_users()
                 except Exception as e:
                     logger.info(f"⚠️ Exception in user cleaner thread: {e}")
+
                 # așteaptă întreruptibil până la următorul ciclu
                 if stop_event.wait(min(full_interval, 30)):
                     break
