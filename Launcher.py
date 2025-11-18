@@ -88,11 +88,9 @@ class HybridBlackBotLauncher:
             "requests",
             "pyyaml"  # For advanced config
         ]
-
         self.optional_packages = [
             "python-dotenv",  # Enhanced .env support
         ]
-
         print_info(f"🔧 Hybrid BlackBoT Launcher initialized")
         print_info(f"📁 Base directory: {self.base_dir}")
         print_info(f"🤖 Unified manager: {'✅' if self.has_unified_manager else '❌'}")
