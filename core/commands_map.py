@@ -1,6 +1,6 @@
 # commands_map.py
 
-import settings as s
+from core.environment_config import config
 
 # ───────────────────────────────────────────────
 # Implemented commands with their configuration
@@ -159,9 +159,9 @@ command_definitions = [
     'id': '33'},
     {'name': 'chat', "description": (
             "DCC chat utilities.\n"
-            f"• {s.char}chat — open a DCC chat to you (alias: {s.char}chat open)\n"
-            f"• {s.char}chat list — list active DCC sessions\n"
-            f"• {s.char}chat close — close your own DCC session"
+            f"• {config.char}chat — open a DCC chat to you (alias: {config.char}chat open)\n"
+            f"• {config.char}chat list — list active DCC sessions\n"
+            f"• {config.char}chat close — close your own DCC session"
         ), 'flags': 'NnMmA', 'id': '34'},
 {
     "id": "35",
@@ -169,11 +169,33 @@ command_definitions = [
     "flags": "Nn",
     "description": (
         "Manage bot-to-bot DCC links.\n"
-        f"• {s.char}botlink add <nick>          – mark user as a bot peer (USERSSETTINGS.botlink=1) and schedule auto-connect\n"
-        f"• {s.char}botlink del <nick>          – unmark and remove from auto-connect\n"
-        f"• {s.char}botlink list                – list peers + DCC sessions (tagged [BOT] if linked)\n"
-        f"• {s.char}botlink connect [nick]      – force connect to peer (or all if omitted)\n"
-        f"• {s.char}botlink disconnect [nick]   – close DCC with peer (or all)\n"
+        f"• {config.char}botlink add <nick>          – mark user as a bot peer (USERSSETTINGS.botlink=1) and schedule auto-connect\n"
+        f"• {config.char}botlink del <nick>          – unmark and remove from auto-connect\n"
+        f"• {config.char}botlink list                – list peers + DCC sessions (tagged [BOT] if linked)\n"
+        f"• {config.char}botlink connect [nick]      – force connect to peer (or all if omitted)\n"
+        f"• {config.char}botlink disconnect [nick]   – close DCC with peer (or all)\n"
     ),
+
+},
+    {'name': 'dns',
+    'description': f'Smart DNS: hostname → A/AAAA, IP → rDNS (PTR).\nUsage: {config.char}dns <host|ip>',
+    'flags': '-', 'id': '36'},
+{
+    'name': 'ping',
+    'description': f'Ping a host (IPv4 sau IPv6). Exemple: {config.char}ping google.com, {config.char}ping 8.8.8.8, {config.char}ping 2a00:1450::1',
+    'flags': '-',  # public command
+    'id': '37'
+},
+{
+    'name': 'ip',
+    'description': f'Get IP/host information (ASN/ORG/LOC/TZ). Examples: {config.char}ip 8.8.8.8, {config.char}ip google.com',
+    'flags': '-',  # public
+    'id': '38'
+},
+{
+    'name': 'asn',
+    'description': f'ASN info. Basic: {config.char}asn AS32934  | Full: {config.char}asn AS32934 full',
+    'flags': '-',  # public
+    'id': '39'
 }
 ]

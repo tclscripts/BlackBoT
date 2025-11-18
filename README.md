@@ -52,7 +52,7 @@ bash BlackBoT_RuN.sh
 
 Requirements
 Python 3.8+
-Linux or Windows (Linux recommended for BlackBoT_RuN.sh or directly Starter.py for Windows)
+Linux or Windows (Linux recommended for BlackBoT_RuN.sh for Windows)
 Internet connection (for auto-update and external modules)
 
 Dependencies are listed in requirements.txt and will be installed automatically if you use the Bash script.

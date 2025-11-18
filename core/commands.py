@@ -1,5 +1,4 @@
 import time
-import settings as s
 from core import Variables as v
 import threading
 import os
@@ -7,7 +6,8 @@ from datetime import datetime
 from core.threading_utils import ThreadWorker
 import core.seen as seen
 import re, shlex
-import socket
+from core.environment_config import config
+
 
 def cmd_ban(self, channel, feedback, nick, host, msg):
     """
@@ -330,7 +330,7 @@ def cmd_help(self, channel, feedback, nick, host, msg):
             return
         descr = target.get("description", "No description")
         for i, line in enumerate(descr.splitlines()):
-            prefix = f"ℹ️ {s.char}{target['name']} — " if i == 0 else "   "
+            prefix = f"ℹ️ {config.char}{target['name']} — " if i == 0 else "   "
             self.send_message(feedback, prefix + line.strip())
         return
 
@@ -340,7 +340,7 @@ def cmd_help(self, channel, feedback, nick, host, msg):
         if not name:
             continue
         flags = (c.get("flags") or "").strip()
-        entry = f"{s.char}{name}"
+        entry = f"{config.char}{name}"
 
         # Public
         if not flags or flags == "-":
@@ -393,6 +393,11 @@ def cmd_help(self, channel, feedback, nick, host, msg):
 def cmd_status(self, channel, feedback, nick, host, msg):
     import psutil
     import platform
+    import os
+    import threading
+    import time
+    from collections import defaultdict
+
     result = self.check_command_access(channel, nick, host, '30', feedback)
     if not result:
         return
@@ -400,7 +405,7 @@ def cmd_status(self, channel, feedback, nick, host, msg):
     now = time.time()
     process = psutil.Process(os.getpid())
 
-    # Basic system info
+    # ─────────── Sistem ───────────
     uptime = now - process.create_time()
     formatted_uptime = self.format_duration(uptime)
     cpu_percent = process.cpu_percent(interval=None)
@@ -411,28 +416,106 @@ def cmd_status(self, channel, feedback, nick, host, msg):
     release = platform.release()
     cpu_model = platform.processor()
 
-    # Thread info
+    # ─────────── ThreadWorker groups ───────────
     threads = threading.enumerate()
-    num_threads = len(threads)
-    thread_names = ", ".join(t.name for t in threads)
+    groups = defaultdict(lambda: {"supervisor": None, "child": None})
 
-    # Internal memory states
+    for t in threads:
+        name = getattr(t, "name", "")
+        base = name[:-6] if name.endswith(".child") else name
+        if name.endswith(".child"):
+            groups[base]["child"] = t
+        else:
+            groups[base]["supervisor"] = t
+
+    noisy_prefixes = ("PoolThread-twisted", "ThreadPoolExecutor")
+
+    def is_noisy(n):
+        return any(n.startswith(pfx) for pfx in noisy_prefixes)
+
+    unique_threads = []
+    for base in sorted(groups.keys(), key=str.lower):
+        if not base or is_noisy(base) or base == "MainThread":
+            continue
+        g = groups[base]
+        sup_alive = g["supervisor"] and g["supervisor"].is_alive()
+        child_alive = g["child"] and g["child"].is_alive()
+        if g["child"]:
+            if sup_alive and child_alive:
+                status = "✅"
+            elif sup_alive:
+                status = "⚠️"
+            else:
+                status = "❌"
+            unique_threads.append(f"{base}({status})")
+        else:
+            unique_threads.append(base)
+
+    threads_line = " · ".join(unique_threads)
+    num_threads = len(unique_threads)
+
+    # ─────────── Stare internă ───────────
     users_logged = len(self.logged_in_users)
     known_users = len(self.known_users)
     user_cache = len(self.user_cache)
     pending_rejoins = len(self.rejoin_pending)
     channel_info = len(self.channel_details)
 
-    # Compose message
+    # ─────────── Net I/O + Load ───────────
+    net_io = psutil.net_io_counters()
+    net_up = net_io.bytes_sent / (1024 ** 2)
+    net_down = net_io.bytes_recv / (1024 ** 2)
+
+    # Load Avg cross-platform
+    load_line = ""
+    try:
+        if hasattr(os, "getloadavg"):
+            la1, la5, la15 = os.getloadavg()
+            load_line = f"📈 Load Avg (1/5/15m): {la1:.2f} / {la5:.2f} / {la15:.2f}"
+        else:
+            cpu1 = psutil.cpu_percent(interval=1.0)
+            load_line = f"📈 CPU Load (1s): {cpu1:.1f}%"
+    except Exception:
+        pass
+
+    # combinăm totul pe o singură linie:
+    system_line = (
+        f"🧠 RAM: {rss_mb:.2f}MB / {total_mem_mb:.0f}MB | "
+        f"🔄 CPU: {cpu_percent:.1f}% | "
+        f"📶 Net I/O: ↑ {net_up:.1f}MB ↓ {net_down:.1f}MB"
+    )
+    if load_line:
+        system_line += f" | {load_line}"
+
+    # ─────────── BotLink + DCC info ───────────
+    try:
+        peers = []
+        dcc_sessions = {}
+        if hasattr(self, "dcc"):
+            peers = sorted(list(self.dcc.list_link_peers()))
+            dcc_sessions = self.dcc.list_sessions()
+        peers_cnt = len(peers)
+        open_cnt = sum(1 for s in dcc_sessions.values() if s.get("state") == "open")
+        botlink_line = f"🔗 BotLink: {peers_cnt} peers ({open_cnt} open)"
+    except Exception:
+        botlink_line = None
+
+    # ─────────── Compose mesaj ───────────
     msg_lines = [
         f"📊 *Advanced Status Report*",
-        f"🔢 Threads: {num_threads} — {thread_names}",
+        f"🔢 Threads ({num_threads}): {threads_line}",
         f"👥 Logged Users: {users_logged} | 🧠 Known: {known_users} | 🔐 Cache: {user_cache}",
         f"🔁 Rejoin Queue: {pending_rejoins} | 📺 Channel Details: {channel_info}",
-        f"🧠 RAM: {rss_mb:.2f}MB / {total_mem_mb:.0f}MB | 🔄 CPU: {cpu_percent:.1f}%",
+        system_line,
+    ]
+
+    if botlink_line:
+        msg_lines.append(botlink_line)
+
+    msg_lines.extend([
         f"💻 System: {system} {release} | CPU: {cpu_model}",
         f"⏱️ Uptime: {formatted_uptime}",
-    ]
+    ])
 
     for line in msg_lines:
         self.send_message(feedback, line)
@@ -450,7 +533,7 @@ def cmd_myset(self, channel, feedback, nick, host, msg):
         return
 
     if len(parts) < 2:
-        self.send_message(feedback, f"⚠️ Usage: {s.char}myset <{'|'.join(v.users_settings_change)}> <value>")
+        self.send_message(feedback, f"⚠️ Usage: {config.char}myset <{'|'.join(v.users_settings_change)}> <value>")
         return
 
     setting, value = parts[0].lower(), parts[1].strip()
@@ -484,7 +567,6 @@ def cmd_deauth(self, channel, feedback, nick, host, msg):
             if not self.logged_in_users[userId]["hosts"]:
                 del self.logged_in_users[userId]
             self.send_message(feedback, "🔓 You have been deauthenticated successfully.")
-            print(f"🔓 Manual logout: {nick} (userId={userId}) from {host}")
         else:
             self.send_message(feedback, "ℹ️ You are not logged in from this host.")
     else:
@@ -529,7 +611,7 @@ def cmd_update(self, channel, feedback, nick, host, msg):
         return
 
     else:
-        self.send_message(feedback, f"⚠️ Usage: {s.char}update check | {s.char}update start")
+        self.send_message(feedback, f"⚠️ Usage: {config.char}update check | {config.char}update start")
 
 
 def cmd_auth(self, channel, feedback, nick, host, msg):
@@ -895,7 +977,7 @@ def cmd_hello(self, channel, feedback, nick, host, msg):
                  f"(make sure email delivery is configured correctly in settings)")
 
         self.msg(nick,
-                 f"ℹ️ Use {s.char}help to see available commands based on your access level.")
+                 f"ℹ️ Use {config.char}help to see available commands based on your access level.")
         self.unbind_hello = True
 
 
@@ -933,7 +1015,7 @@ def cmd_restart(self, channel, feedback, nick, host, msg):
 
 def cmd_cycle(self, channel, feedback, nick, host, msg):
     if channel.lower() == self.nickname.lower():
-        self.send_message(feedback, f"⚠️ Usage: {s.char}cycle <#channel>")
+        self.send_message(feedback, f"⚠️ Usage: {config.char}cycle <#channel>")
         return
     result = self.check_command_access(channel, nick, host, '9', feedback)
     if not result:
@@ -967,7 +1049,7 @@ def cmd_add(self, channel, feedback, nick, host, msg):
 
     args = msg.strip().split()
     if len(args) < 2:
-        self.send_message(feedback, f"⚠️ Usage: {s.char}add <role> <nick1> <nick2> ...")
+        self.send_message(feedback, f"⚠️ Usage: {config.char}add <role> <nick1> <nick2> ...")
         return
 
     role = args[0].lower()
@@ -1140,7 +1222,7 @@ def cmd_delacc(self, channel, feedback, nick, host, msg):
 
     args = msg.strip().split()
     if not args:
-        self.send_message(feedback, f"⚠️ Usage: {s.char}del <nick1> <nick2> ...")
+        self.send_message(feedback, f"⚠️ Usage: {config.char}del <nick1> <nick2> ...")
         return
 
     sql = result["sql"]
@@ -1214,7 +1296,7 @@ def cmd_del(self, channel, feedback, nick, host, msg):
 
     args = msg.strip().split()
     if not args:
-        self.send_message(feedback, f"⚠️ Usage: {s.char}del <username>")
+        self.send_message(feedback, f"⚠️ Usage: {config.char}del <username>")
         return
 
     userId = result["userId"]
@@ -1261,7 +1343,7 @@ def cmd_seen(self, channel, feedback, nick, host, msg):
 
     pattern = (msg or "").strip().split()[0] if msg else ""
     if not pattern:
-        self.send_message(feedback, f"Usage: {s.char}seen <nick|host|pattern>")
+        self.send_message(feedback, f"Usage: {config.char}seen <nick|host|pattern>")
         return
 
     if (msg or "").strip().lower() == "-stats":
@@ -1278,7 +1360,7 @@ def cmd_seen(self, channel, feedback, nick, host, msg):
 def cmd_info(self, channel, feedback, nick, host, msg):
     global thost_mask
     if channel.lower() == self.nickname.lower():
-        self.send_message(feedback, f"⚠️ Usage: {s.char}info <#channel|user>")
+        self.send_message(feedback, f"⚠️ Usage: {config.char}info <#channel|user>")
         return
     arg = msg.strip()
 
@@ -1432,7 +1514,7 @@ def cmd_chat(self, channel, feedback, nick, host, msg):
             self.send_message(
                 feedback,
                 f"ℹ️ You already have a DCC session ({_state(sess)}). "
-                f"Use {s.char}chat close to end it."
+                f"Use {config.char}chat close to end it."
             )
             return
         self.dcc.offer_chat(nick, feedback=feedback)
@@ -1441,7 +1523,7 @@ def cmd_chat(self, channel, feedback, nick, host, msg):
     # --- HELP / unknown ---
     self.send_message(
         feedback,
-        f"Usage: {s.char}chat [open|list|close]  "
+        f"Usage: {config.char}chat [open|list|close]  "
         f"→ open (default), list active sessions, or close your DCC session."
     )
 
@@ -1503,7 +1585,7 @@ def cmd_botlink(self, channel, feedback, nick, host, msg):
 
     tokens = (msg or "").split()
     if not tokens:
-        self.send_message(feedback, f"Usage: {s.char}botlink add|del|list|connect|disconnect")
+        self.send_message(feedback, f"Usage: {config.char}botlink add|del|list|connect|disconnect")
         return
 
     action = tokens[0].lower()
@@ -1511,7 +1593,7 @@ def cmd_botlink(self, channel, feedback, nick, host, msg):
     # === ADD ===
     if action == "add":
         if len(tokens) < 4:
-            self.send_message(feedback, f"Usage: {s.char}botlink add <nick> <ip> <port>")
+            self.send_message(feedback, f"Usage: {config.char}botlink add <nick> <ip> <port>")
             return
 
         peer_name, ip, port_s = tokens[1], tokens[2], tokens[3]
@@ -1555,7 +1637,7 @@ def cmd_botlink(self, channel, feedback, nick, host, msg):
     # === DELETE ===
     elif action == "del":
         if len(tokens) < 2:
-            self.send_message(feedback, f"Usage: {s.char}botlink del <nick>")
+            self.send_message(feedback, f"Usage: {config.char}botlink del <nick>")
             return
 
         target_nick = tokens[1]
@@ -1712,8 +1794,87 @@ def cmd_botlink(self, channel, feedback, nick, host, msg):
         return None
 
     else:
-            self.send_message(feedback, f"Usage: {s.char}botlink add|del|list|connect|disconnect")
+            self.send_message(feedback, f"Usage: {config.char}botlink add|del|list|connect|disconnect")
             return None
+
+def cmd_dns(self, channel, feedback, nick, host, msg):
+    from core import nettools
+    from twisted.internet.threads import deferToThread
+    target = (msg or "").strip().split()[0] if msg else ""
+    if not target:
+        self.send_message(feedback, f"Usage: {config.char}dns <host|ip>")
+        return
+
+    def work():
+        res = nettools.smart_dns(target)
+        return nettools.format_smart_dns(res)
+
+    def done(lines):
+        for line in lines:
+            self.send_message(feedback, line)
+
+    deferToThread(work).addCallback(done)
+
+def cmd_ping(self, channel, feedback, nick, host, msg):
+    from core import nettools
+    from twisted.internet.threads import deferToThread
+    target = (msg or "").strip().split()[0] if msg else ""
+    if not target:
+        self.send_message(feedback, f"Usage: {config.char}ping <host|ip>")
+        return
+    def work():
+        result = nettools.ping(target)
+        return nettools.format_ping(result)
+
+    def done(lines):
+        for line in lines:
+            self.send_message(feedback, line)
+
+    deferToThread(work).addCallback(done)
+
+
+def cmd_ip(self, channel, feedback, nick, host, msg):
+    from core import nettools
+    from twisted.internet.threads import deferToThread
+    target = (msg or "").strip().split()[0] if msg else ""
+    if not target:
+        self.send_message(feedback, f"Usage: {config.char}ip <ip|host>")
+        return
+
+    def work():
+        res = nettools.ip_info(target)          # colectează info
+        return nettools.format_ipinfo(res)      # formatează pentru IRC
+
+    def done(lines):
+        for line in lines:
+            self.send_message(feedback, line)
+
+    deferToThread(work).addCallback(done)
+
+def cmd_asn(self, channel, feedback, nick, host, msg):
+    from core import nettools
+    from twisted.internet.threads import deferToThread
+
+    args = (msg or "").strip().split()
+    if not args:
+        self.send_message(feedback, f"Usage: {config.char}asn <AS|ip|host> [full]")
+        return
+
+    target = args[0]
+    want_full = (len(args) > 1 and args[1].lower() == "full")
+
+    if want_full:
+        def work_full():
+            data = nettools.asn_full(target, sample=6)
+            return nettools.format_asn_full(data)
+        return deferToThread(work_full).addCallback(lambda lines: [self.send_message(feedback, l) for l in lines])
+
+    # fallback: scurt
+    def work_short():
+        res = nettools.asn_info(target)
+        return nettools.format_asn(res)
+    deferToThread(work_short).addCallback(lambda lines: [self.send_message(feedback, l) for l in lines])
+
 
 
 

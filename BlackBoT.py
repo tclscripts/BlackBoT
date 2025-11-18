@@ -1,3 +1,4 @@
+
 import datetime
 import sys
 import ipaddress
@@ -5,16 +6,95 @@ import ssl
 import os
 import queue
 import logging
-import Starter
-import settings as s
 import socket
+import time
+import platform
+import threading
 from functools import partial
+from pathlib import Path
+
+# ============================================================================
+# AUTO-DETECT AND ACTIVATE VIRTUAL ENVIRONMENT
+# ============================================================================
+def _setup_virtual_environment():
+    """
+    Auto-detect and activate virtual environment, similar to Launcher.py
+    This allows BlackBoT.py to run independently with all dependencies.
+    """
+    # Get the base directory where BlackBoT.py is located
+    base_dir = Path(__file__).parent.resolve()
+    # Check if we're already in a virtual environment
+    if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
+        # Already in venv, no need to do anything
+        return
+
+    # Try to find virtual environment directory
+    possible_venvs = ["environment", ".venv", "venv", "env"]
+    venv_dir = None
+
+    for venv_name in possible_venvs:
+        candidate = base_dir / venv_name
+        if candidate.exists():
+            venv_dir = candidate
+            break
+
+    if not venv_dir:
+        # No venv found, continue with system Python
+        return
+    # Detect OS and set appropriate paths
+    if os.name == "nt":  # Windows
+        venv_bin = venv_dir / "Scripts"
+        python_exec = venv_bin / "python.exe"
+    else:  # Linux/macOS
+        venv_bin = venv_dir / "bin"
+        python_exec = venv_bin / "python"
+
+    if not python_exec.exists():
+        # Venv directory exists but is invalid
+        return
+
+    # Activate virtual environment by modifying sys.path and environment
+    # This is similar to what 'activate' script does
+
+    # 1. Add venv site-packages to sys.path (at the beginning)
+    if os.name == "nt":
+        site_packages = venv_dir / "Lib" / "site-packages"
+    else:
+        # Find the correct site-packages path
+        for item in venv_dir.rglob("site-packages"):
+            if item.is_dir():
+                site_packages = item
+                break
+        else:
+            site_packages = None
+
+    if site_packages and site_packages.exists():
+        # Insert at position 0 to have highest priority
+        sys.path.insert(0, str(site_packages))
+
+    # 2. Update PATH environment variable to include venv bin
+    old_path = os.environ.get("PATH", "")
+    new_path = f"{venv_bin}{os.pathsep}{old_path}"
+    os.environ["PATH"] = new_path
+
+    # 3. Set VIRTUAL_ENV environment variable
+    os.environ["VIRTUAL_ENV"] = str(venv_dir)
+
+    # 4. Update sys.prefix and sys.exec_prefix
+    sys.prefix = str(venv_dir)
+    sys.exec_prefix = str(venv_dir)
+
+
+# Call the setup function BEFORE importing Twisted and other dependencies
+_setup_virtual_environment()
+
 
 from twisted.internet import protocol, ssl, reactor
 from twisted.words.protocols import irc
 from collections import defaultdict, deque
-
+from twisted.internet.threads import deferToThread
 sys.path.append(os.path.join(os.path.dirname(__file__), 'core'))
+import core.environment_config as env
 from core import commands
 from core import Variables as v
 from core.commands_map import command_definitions
@@ -22,57 +102,43 @@ from core.threading_utils import ThreadWorker
 from core.sql_manager import SQLManager
 from core import seen
 from core.threading_utils import get_event
-from collections import OrderedDict
 from core.dcc import DCCManager
-
-import time
-import psutil
+from core.optimized_cache import SmartTTLCache
 from core.monitor_client import ensure_enrollment, send_heartbeat, send_monitor_offline
-import platform
-from twisted.internet.threads import deferToThread
-import threading
+from core.log import get_logger, install_excepthook, log_session_banner
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Initialize Configuration System
+# ═══════════════════════════════════════════════════════════════════
+s = env.config
 
 _GLOBAL_WORKERS: dict[str, threading.Thread] = {}
 _GLOBAL_LOCK = threading.Lock()
 
+# Initialize global logger using settings.py configuration
+logger = get_logger("blackbot")
 
-class TTLCache(OrderedDict):
-    def __init__(self, maxlen=2000, ttl=6 * 3600):
-        super().__init__()
-        self.maxlen = maxlen
-        self.ttl = ttl
+# Capture and log uncaught exceptions automatically
+install_excepthook(logger)
 
-    def set(self, key, value):
-        now = time.time()
-        super().__setitem__(key, (value, now))
-        self._trim(now)
+_WORKER_POLICY = {
+    "monitor":       {"supervise": True, "provide_signals": True,  "heartbeat_timeout": 60.0},
+    "logged_users":  {"supervise": True, "provide_signals": True,  "heartbeat_timeout": 90.0},
+    "uptime":        {"supervise": True, "provide_signals": True,  "heartbeat_timeout": 120.0},
+    "manual_update": {"supervise": False, "provide_signals": False},
+    "botlink": {"supervise": True, "provide_signals": True, "heartbeat_timeout": 90.0},
+    "*":             {"supervise": True, "provide_signals": False}
+}
 
-    def get_valid(self, key):
-        item = super().get(key)
-        if not item:
-            return None
-        value, ts = item
-        if time.time() - ts > self.ttl:
-            super().__delitem__(key)
-            return None
-        # LRU: mută la final
-        super().__delitem__(key)
-        super().__setitem__(key, (value, ts))
-        return value
+session_details = {
+    "nickname": getattr(s, "nickname", "Unknown"),
+    "servers": ", ".join(getattr(s, "servers", []) or []),
+    "dcc_fixed_port": str(getattr(s, "dcc_listen_port", "")),
+    "log_file": f"{getattr(s, 'logs_dir', 'logs')}/{getattr(s, 'log_file', 'blackbot.log')}",
+}
 
-    def _trim(self, now=None):
-        now = now or time.time()
-        # expiră intrările vechi
-        for k, (v, ts) in list(self.items()):
-            if now - ts > self.ttl:
-                super().__delitem__(k)
-        # ține doar ultimele maxlen (LRU)
-        while len(self) > self.maxlen:
-            self.popitem(last=False)
-
-
+log_session_banner(logger, title="BLACKBOT START", details=session_details)
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 
 servers_order = 0
@@ -96,7 +162,8 @@ class Bot(irc.IRCClient):
             self.port = getattr(self.factory, "port", None) or getattr(peer, "port", None)
         except Exception:
             pass
-
+        self.logger = logger  # Attach global logger to this instance
+        self.logger.info("Logger initialized for BlackBoT instance.")
         self._init_worker_registry()
         self.monitorId = None
         self.version = _load_version()
@@ -132,7 +199,10 @@ class Bot(irc.IRCClient):
         self.clean_logged_users(silent=True)
         self.thread_check_logged_users_started = False
         self.known_users = set()  # (channel, nick)
-        self.user_cache = TTLCache(maxlen=2000, ttl=6 * 3600)
+        self.user_cache = SmartTTLCache(
+            maxlen=2000, ttl=6 * 3600, adaptive_ttl=True,
+            background_cleanup=False, enable_stats=True
+        )
         self.flood_tracker = defaultdict(lambda: deque())
         self.current_start_time = time.time()
         self.sqlite3_database = s.sqlite3_database
@@ -141,19 +211,19 @@ class Bot(irc.IRCClient):
                                                  self.away)
         self.botId = self.newbot[1]
         self.host_to_nicks = defaultdict(set)
-        self._start_worker("uptime", target=lambda: self.sql.sqlite_update_uptime(self, self.botId),
-                           global_singleton=True)
+        self._start_worker(
+            "uptime",
+            target=lambda se, b: self.sql.sqlite_update_uptime(self, self.botId, se, b),
+            global_singleton=True
+        )
         self._start_worker("known_users", target=self.cleanup_known_users, global_singleton=True)
         if self.sql.sqlite_has_active_ignores(self.botId):
-            print("⏳ Active ignores found. Starting cleanup thread...")
+            logger.info("⏳ Active ignores found. Starting cleanup thread...")
             self._start_worker("ignore_cleanup", target=self.cleanup_ignores)
-
-        # 💬 Message sender thread
         self.message_queue = queue.Queue()
         self.message_delay = s.message_delay
         self._start_worker("message_sender", target=self._message_worker, global_singleton=False)
         self.thread_check_for_changed_nick = None
-
         if s.autoUpdateEnabled:
             self._start_worker("auto_update", target=self.auto_update_check_loop, global_singleton=True)
 
@@ -161,13 +231,10 @@ class Bot(irc.IRCClient):
             self.unbind_hello = True
         else:
             self.unbind_hello = False
-
         reactor.addSystemEventTrigger(
             'before', 'shutdown',
             partial(send_monitor_offline, self.monitorId, self.hmac_secret)
         )
-
-        # DCC chat manager
         self.dcc = DCCManager(
             self,
             public_ip=(getattr(s, "dcc_public_ip", "") or None),
@@ -197,39 +264,45 @@ class Bot(irc.IRCClient):
                 self._timers.discard(dc)
 
     def _start_worker(self, name: str, target, daemon: bool = True, global_singleton: bool = True):
-        """
-        Pornește un worker numit `name`.
-        - Dacă global_singleton=True: NU mai pornește dacă există deja un thread activ cu același nume
-          (verificat în threading.enumerate()) – util când apare un nou Bot la reconectare.
-        - Folosește get_event(name).clear() doar când chiar pornim un thread nou.
-        """
-        # 1) dacă e singleton global, nu dubla
-        if global_singleton:
-            for t in threading.enumerate():
-                if t.name == name and getattr(t, "is_alive", lambda: False)():
-                    # reține-l în registru local și ieși fără să mai pornești alt thread
-                    self._workers[name] = t
-                    return None
+        import inspect
+        # singleton global: dacă deja rulează, nu-l mai porni
+        if global_singleton and hasattr(self, "_workers") and name in self._workers:
+            tw = self._workers.get(name)
+            try:
+                if tw and tw.is_alive():
+                    return tw
+            except Exception:
+                pass
 
-        # 2) dacă ai deja un worker înregistrat și încă e viu, nu-l dubla
-        existing = self._workers.get(name)
-        if existing and getattr(existing, "is_alive", lambda: False)():
-            return None
+        pol = _WORKER_POLICY.get(name) or _WORKER_POLICY["*"]
+        supervise = bool(pol.get("supervise", True))
+        provide_signals = bool(pol.get("provide_signals", False))
+        heartbeat_timeout = pol.get("heartbeat_timeout", None)
 
-        # 3) chiar pornim unul nou -> resetăm evenimentul
+        # auto-detect: dacă target are semnătura (stop_event, beat), forțăm provide_signals=True
         try:
-            get_event(name).clear()
+            sig = inspect.signature(target)
+            if len(sig.parameters) >= 2:
+                provide_signals = True
         except Exception:
             pass
 
-        tw = ThreadWorker(target=target, name=name)
+        tw = ThreadWorker(
+            target=target,
+            name=name,
+            supervise=supervise,
+            provide_signals=provide_signals,
+            heartbeat_timeout=heartbeat_timeout
+        )
         tw.daemon = daemon
         tw.start()
+
+        if not hasattr(self, "_workers"):
+            self._workers = {}
         self._workers[name] = tw
         return tw
 
     def _stop_worker(self, name: str, join_timeout: float = 1.0):
-        """Oprește un worker PORNIT de această instanță (nu atinge singleton-urile globale)."""
         tw = self._workers.get(name)
         if not tw:
             return
@@ -276,7 +349,7 @@ class Bot(irc.IRCClient):
 
             creds = ensure_enrollment(self.nickname, version, server_str)
             if not creds:
-                print("⚠️ Monitor enrollment pending/failed; monitoring disabled for now.")
+                logger.info("⚠️ Monitor enrollment pending/failed; monitoring disabled for now.")
                 self.monitor_enabled = False
                 return
 
@@ -284,14 +357,14 @@ class Bot(irc.IRCClient):
                 "bot_id"]  # de pus alt nume pentru a adauga in monitor, coincide cu botId din baza de date
             self.hmac_secret = creds["hmac_secret"]
             self.monitor_enabled = True
-            print(f"✅ Monitor enrolled (bot_id={self.monitorId[:8]}...). Starting heartbeat.")
+            logger.info(f"✅ Monitor enrolled (bot_id={self.monitorId[:8]}...). Starting heartbeat.")
             # start heartbeat pe threadpool tot cu deferToThread
             reactor.callFromThread(self._start_heartbeat_loop)
 
         except Exception as e:
             import traceback
-            print(f"❌ Monitor init error: {e}")
-            traceback.print_exc()
+            logger.error(f"❌ Monitor init error: {e}")
+            traceback.logger.info_exc()
             self.monitor_enabled = False
 
     def _start_monitor_init_async(self):
@@ -299,9 +372,10 @@ class Bot(irc.IRCClient):
             return
         self._monitor_init_started = True
         d = deferToThread(self._monitor_init_worker)
-        d.addErrback(lambda f: print(f"❌ monitor_init errback: {f.getErrorMessage()}"))
+        d.addErrback(lambda f: logger.info(f"❌ monitor_init errback: {f.getErrorMessage()}"))
 
     def _collect_metrics(self):
+        import psutil
         ram_mb = 0.0
         if psutil:
             try:
@@ -328,13 +402,11 @@ class Bot(irc.IRCClient):
         if getattr(self, "_hb_thread", None):
             return
 
-        # inițializează evenimentul de oprire (pentru stop prompt)
         self._hb_stop = threading.Event()
 
         def _loop():
             interval = 30
             backoff = interval
-            # rulează doar cât timp monitorul este activ, conexiunea este activă și nu s-a cerut stop
             while getattr(self, "monitor_enabled", False) and self.connected and not self._hb_stop.is_set():
                 try:
                     payload = self._collect_metrics()
@@ -343,9 +415,9 @@ class Bot(irc.IRCClient):
                         backoff = interval
                     else:
                         backoff = min(backoff * 2, 300)
+                        logger.debug(f"Heartbeat loop backoff (next={backoff}s)")
                 except Exception:
                     backoff = min(backoff * 2, 300)
-                # nu dormi „orb”: revino rapid dacă s-a cerut oprire
                 self._hb_stop.wait(backoff)
 
         self._start_worker("heartbeat", target=_loop, global_singleton=False)
@@ -356,7 +428,7 @@ class Bot(irc.IRCClient):
                 self._hb_stop.set()
         except Exception:
             pass
-        print("🛑 Heartbeat loop stopped.")
+        logger.info("🛑 Heartbeat loop stopped.")
 
     def _get_ident_host_from_channel(self, channel: str, nick: str):
         for c, n, ident, host, *_ in self.channel_details:
@@ -395,7 +467,7 @@ class Bot(irc.IRCClient):
         seen.on_quit(self.sql, self.botId, nick, message, ident=ident, host=host)
 
     def signedOn(self):
-        print("Signed on to the server")
+        logger.info("Signed on to the server")
         # load commands
         self.load_commands()
         try:
@@ -403,19 +475,19 @@ class Bot(irc.IRCClient):
             if self.connected:
                 self._start_monitor_init_async()
         except Exception as e:
-            print(f"⚠️ Monitor init failed: {e}")
+            logger.info(f"⚠️ Monitor init failed: {e}")
             self.monitor_enabled = False
-        if self.known_users:
-            print("🔄 Resetting user caches.")
-            self.known_users.clear()
             self.user_cache.clear()
+        if self.known_users:
+            logger.info("🔄 Resetting user caches.")
+            self.known_users.clear()
         self.connected = True
         self.current_connect_time = time.time()
         self.sendLine("AWAY :" + s.away)
         if s.nickserv_login_enabled:
             self.login_nickserv()
             if s.require_nickserv_ident:
-                print("⏳ Waiting for NickServ identification before joining channels.")
+                logger.info("⏳ Waiting for NickServ identification before joining channels.")
                 return
         self._join_channels()
 
@@ -458,7 +530,7 @@ class Bot(irc.IRCClient):
         except Exception:
             pass
 
-        print(
+        logger.info(
             f"🔌 Disconnected from IRC: {reason}. Heartbeat & per-connection workers stopped; global workers kept alive.")
 
     def _ensure_channel_canonical_in_db(self, requested_name: str, canonical_name: str):
@@ -477,7 +549,7 @@ class Bot(irc.IRCClient):
         if self.notOnChannels and channel.lower() in (c.lower() for c in self.notOnChannels):
             self.notOnChannels.remove(channel)
 
-        print(f"Joined channel {channel}")
+        logger.info(f"Joined channel {channel}")
 
         if channel in self.rejoin_pending:
             del self.rejoin_pending[channel]
@@ -485,7 +557,7 @@ class Bot(irc.IRCClient):
             requested = self.pending_join_requests.pop(channel.lower(), None)
             self._ensure_channel_canonical_in_db(requested_name=requested, canonical_name=channel)
         except Exception as e:
-            print(f"[WARN] DB sync on join failed for {channel}: {e}")
+            logger.info(f"[WARN] DB sync on join failed for {channel}: {e}")
 
         self.sendLine(f"WHO {channel}")
 
@@ -520,7 +592,7 @@ class Bot(irc.IRCClient):
         self._schedule_rejoin(channel)
 
     def userRenamed(self, oldnick, newnick):
-        print(f"🔄 Nick change detected: {oldnick} → {newnick}")
+        logger.info(f"🔄 Nick change detected: {oldnick} → {newnick}")
         seen.on_nick_change(self.sql, self.botId, oldnick, newnick)
 
         for user in self.channel_details:
@@ -570,7 +642,7 @@ class Bot(irc.IRCClient):
                 if not self.sql.sqlite_is_channel_suspended(channel[0]):
                     self.join_channel(channel[0])
                     self.channels.append(channel[0])
-                    print(f"Joining {channel[0]} ..")
+                    logger.info(f"Joining {channel[0]} ..")
                 else:
                     self.notOnChannels.append(channel[0])
 
@@ -579,7 +651,7 @@ class Bot(irc.IRCClient):
         while not stop_ev.is_set():
             self.sql.sqlite_cleanup_ignores()
             if not self.sql.sqlite_has_active_ignores(self.botId):
-                print("🛑 No more active ignores. Cleanup thread exiting.")
+                logger.info("🛑 No more active ignores. Cleanup thread exiting.")
                 self.ignore_cleanup_started = False
                 break
             time.sleep(60)
@@ -589,15 +661,15 @@ class Bot(irc.IRCClient):
             return
         try:
             self.sendLine(f"PRIVMSG {s.nickserv_nick} :IDENTIFY {s.nickserv_botnick} {s.nickserv_password}")
-            print(f"🔐 Sent IDENTIFY to {s.nickserv_nick}")
+            logger.info(f"🔐 Sent IDENTIFY to {s.nickserv_nick}")
             self.nickserv_waiting = True
         except Exception as e:
-            print(f"❌ Failed to IDENTIFY to {s.nickserv_nick}: {e}")
+            logger.info(f"❌ Failed to IDENTIFY to {s.nickserv_nick}: {e}")
 
     def start_ignore_cleanup_if_needed(self):
         if not self.ignore_cleanup_started:
             if self.sql.sqlite_has_active_ignores(self.botId):
-                print("⏳ Active ignores found. Starting cleanup thread...")
+                logger.info("⏳ Active ignores found. Starting cleanup thread...")
                 self.thread_ignore_cleanup = ThreadWorker(target=self.cleanup_ignores, name="ignore_cleanup")
                 self.thread_ignore_cleanup.start()
                 self.ignore_cleanup_started = True
@@ -642,7 +714,7 @@ class Bot(irc.IRCClient):
             self.flood_tracker[host].popleft()
 
         if len(self.flood_tracker[host]) > limit:
-            print(f"⚠️ Flood detected from {host}, blacklisting...")
+            logger.info(f"⚠️ Flood detected from {host}, blacklisting...")
             reason = f"Flooding bot (>{limit}/{interval}s)"
             self.sql.sqlite_add_ignore(self, self.botId, host, s.private_flood_time * 60, reason)
             return True
@@ -691,28 +763,24 @@ class Bot(irc.IRCClient):
             "lhost": lhost
         }
 
-    # check logged users to deauth
-    def _check_logged_users_loop(self):
-
-        stop_ev = get_event("logged_users")
-
+    def _check_logged_users_loop(self, stop_event, beat):
         full_interval = max(1, int(3600 * getattr(s, "autoDeauthTime", 1)))
-
-        while not stop_ev.is_set():
-            if not self.logged_in_users:
-                print("✅ No more logged-in users. Monitor thread exiting.")
-                self.thread_check_logged_users_started = False
-                break
-
-            try:
-                self.clean_logged_users()
-            except Exception as e:
-                print(f"⚠️ Exception in user cleaner thread: {e}")
-
-            for _ in range(full_interval):
-                if stop_ev.wait(1.0):
+        try:
+            while not stop_event.is_set():
+                beat()  # ✅ heartbeat către supraveghetor
+                if not self.logged_in_users:
+                    logger.info("✅ No more logged-in users. Monitor thread exiting.")
+                    self.thread_check_logged_users_started = False
                     break
-        self.thread_check_logged_users_started = False
+                try:
+                    self.clean_logged_users()
+                except Exception as e:
+                    logger.info(f"⚠️ Exception in user cleaner thread: {e}")
+                # așteaptă întreruptibil până la următorul ciclu
+                if stop_event.wait(min(full_interval, 30)):
+                    break
+        finally:
+            self.thread_check_logged_users_started = False
 
     def clean_logged_users(self, silent=False):
         to_remove = []
@@ -729,7 +797,7 @@ class Bot(irc.IRCClient):
                 }
         for userId in to_remove:
             del self.logged_in_users[userId]
-            print(f"🔒 Auto-logout (netsplit or left): userId={userId}")
+            logger.info(f"🔒 Auto-logout (netsplit or left): userId={userId}")
 
     def logoutOnQuit(self, user):
         nick = user
@@ -751,7 +819,7 @@ class Bot(irc.IRCClient):
                 hosts.remove(formatted_host)
                 if not hosts:
                     to_remove.append(userId)
-                print(f"🔒 Logout on QUIT: {nick} (userId={userId}) from {formatted_host}")
+                logger.info(f"🔒 Logout on QUIT: {nick} (userId={userId}) from {formatted_host}")
 
         for uid in to_remove:
             del self.logged_in_users[uid]
@@ -782,42 +850,42 @@ class Bot(irc.IRCClient):
                 self.user_update_status(channel, nick, privilege_char, set)
 
     def irc_ERR_BANNEDFROMCHAN(self, prefix, params):
-        print(f"Error: Banned from channel {params[1]}")
+        logger.info(f"Error: Banned from channel {params[1]}")
         if params[1].lower() in (c.lower() for c in self.notOnChannels):
             self.notOnChannels.append(params[1])
             self.addChannelToPendingList(params[1], f"banned on {params[1]}")
         self._schedule_rejoin(params[1])
 
     def irc_ERR_CHANNELISFULL(self, prefix, params):
-        print(f"Error: Channel {params[1]} is full")
+        logger.info(f"Error: Channel {params[1]} is full")
         if params[1].lower() in (c.lower() for c in self.notOnChannels):
             self.notOnChannels.append(params[1])
             self.addChannelToPendingList(params[1], f"{params[1]} is full, cannot join")
         self._schedule_rejoin(params[1])
 
     def irc_ERR_BADCHANNELKEY(self, prefix, params):
-        print(f"Error: Bad channel key for {params[1]}")
+        logger.info(f"Error: Bad channel key for {params[1]}")
         if params[1].lower() in (c.lower() for c in self.notOnChannels):
             self.notOnChannels.append(params[1])
             self.addChannelToPendingList(params[1], f"invalid channel key (+k) for {params[1]}")
         self._schedule_rejoin(params[1])
 
     def irc_ERR_INVITEONLYCHAN(self, prefix, params):
-        print(f"Error: Invite-only channel {params[1]}")
+        logger.info(f"Error: Invite-only channel {params[1]}")
         if params[1].lower() in (c.lower() for c in self.notOnChannels):
             self.notOnChannels.append(params[1])
             self.addChannelToPendingList(params[1], f"invite only on {params[1]}")
         self._schedule_rejoin(params[1])
 
     def irc_ERR_NOSUCHCHANNEL(self, prefix, params):
-        print(f"Error: No such channel {params[1]}")
+        logger.info(f"Error: No such channel {params[1]}")
 
     def irc_ERR_CANNOTSENDTOCHAN(self, prefix, params):
-        print(f"Error: Cannot send to channel {params[1]}")
+        logger.info(f"Error: Cannot send to channel {params[1]}")
 
     def irc_INVITE(self, prefix, params):
         inviter = prefix.split('!')[0]
-        print(f"Received invitation from {inviter} to join {params[1]}")
+        logger.info(f"Received invitation from {inviter} to join {params[1]}")
         if params[1] in self.channels:
             if params[1] in self.notOnChannels:
                 self.join_channel(params[1])
@@ -875,10 +943,6 @@ class Bot(irc.IRCClient):
             privilege_chars = {'@', '+', '%', '&', '~'}
             privileges = ''.join(sorted(c for c in wstatus if c in privilege_chars))
 
-            # --- SAFE TTLCache access ---
-            if not isinstance(self.user_cache, TTLCache):
-                self.user_cache = TTLCache(maxlen=2000, ttl=6 * 3600)
-
             key = (wnickname, whost)  # cache key: (nick, host-only)
             userId = self.user_cache.get_valid(key)
             if userId is None:
@@ -912,6 +976,8 @@ class Bot(irc.IRCClient):
                 nicks_on_host = self.host_to_nicks.get(lhost, set()) or {wnickname}
                 self.logged_in_users[userId]["nicks"].update(nicks_on_host)
                 self.logged_in_users[userId]["nick"] = wnickname
+
+                # ✅ pornește workerul logged_users cu policy (are beat)
                 self._start_worker("logged_users", target=self._check_logged_users_loop, global_singleton=True)
 
             else:
@@ -926,7 +992,7 @@ class Bot(irc.IRCClient):
         elif self.recover_nick_timer_start:
             return
         else:
-            print(f"Nickname {s.nickname} is already in use, switching to alternative nick..")
+            logger.info(f"Nickname {s.nickname} is already in use, switching to alternative nick..")
             self.nick_already_in_use = 1
             self.nickname = s.altnick
             if self.nickname != s.nickname:  # start doar dacă e alt nick
@@ -953,14 +1019,14 @@ class Bot(irc.IRCClient):
         entry['attempts'] += 1
 
         if entry['attempts'] > s.maxAttemptRejoin:
-            print(f"❌ Failed to rejoin {channel} after {s.maxAttemptRejoin} attempts. Suspending the channel.")
+            logger.info(f"❌ Failed to rejoin {channel} after {s.maxAttemptRejoin} attempts. Suspending the channel.")
             entry = self.rejoin_pending.get(channel, {})
             reason = entry.get('reason', 'unknown')
             self.sql.sqlite_auto_suspend_channel(channel, reason)
             self.notOnChannels.append(channel)
             del self.rejoin_pending[channel]
             return
-        print(f"🔄 Rejoin attempt {entry['attempts']} for {channel}...")
+        logger.info(f"🔄 Rejoin attempt {entry['attempts']} for {channel}...")
         self.join_channel(channel)
 
     def load_commands(self):
@@ -977,7 +1043,7 @@ class Bot(irc.IRCClient):
                     'id': cmd['id']
                 })
             else:
-                print(f"[WARN] Function cmd_{cmd['name']} not found in commands.py")
+                logger.info(f"[WARN] Function cmd_{cmd['name']} not found in commands.py")
 
     def parse_prefix(self, prefix):
         if "!" in prefix and "@" in prefix:
@@ -1054,14 +1120,14 @@ class Bot(irc.IRCClient):
         if nick.lower() == s.nickserv_nick.lower() and getattr(self, "nickserv_waiting", True):
             if any(keyword in message.lower() for keyword in
                    ["you are now identified", "has been successfully identified"]):
-                print("✅ NickServ identification successful (via NOTICE).")
+                logger.info("✅ NickServ identification successful (via NOTICE).")
                 self.nickserv_waiting = False
                 self._join_channels()
             elif any(keyword in message.lower() for keyword in
                      ["password incorrect", "authentication failed", "is not a registered"]):
-                print("❌ NickServ identification failed (via NOTICE).")
+                logger.info("❌ NickServ identification failed (via NOTICE).")
                 self.nickserv_waiting = False
-                print("➡️ Falling back to main channel only.")
+                logger.info("➡️ Falling back to main channel only.")
                 for chan in s.channels:
                     self.join(chan)
                     self.channels.append(chan)
@@ -1136,10 +1202,6 @@ class Bot(irc.IRCClient):
                 self.send_message(feedback, f"🛠️ Execution error → {e}")
 
     def send_message(self, channel, message):
-        """
-        Dacă 'channel' este un nick și există o sesiune DCC activă cu el,
-        trimite direct în DCC. Altfel, ca înainte (PRIVMSG IRC / queue).
-        """
         try:
             if hasattr(self, "dcc") and channel and not channel.startswith("#"):
                 sess = self.dcc.sessions.get(channel.lower())
@@ -1199,7 +1261,6 @@ class Bot(irc.IRCClient):
                 lines.append(paragraph)
         return lines
 
-    # CTCP version reply
     def ctcpQuery_VERSION(self, user, message, a):
         user = user.split('!')[0]
         from core.update import read_local_version
@@ -1223,19 +1284,74 @@ class Bot(irc.IRCClient):
             return True
         return False
 
-    # restart bot process
     def restart(self, reason="Restarting..."):
-        self.sendLine(f"QUIT :{reason}")
+        try:
+            self.sendLine(f"QUIT :{reason}")
+        except Exception:
+            pass
+
         reactor.callLater(2.0, self._restart_process)
 
     def _restart_process(self):
-        reactor.stop()
-        python = sys.executable
-        os.execl(python, python, *sys.argv)
+        import os
+        import sys
+        import subprocess
+        from pathlib import Path
+
+        instance = os.getenv("BLACKBOT_INSTANCE_NAME", "main")
+        base_dir = Path(__file__).resolve().parent
+        script = base_dir / "BlackBoT.py"
+        env = os.environ.copy()
+        env["BLACKBOT_INSTANCE_NAME"] = instance
+
+        if os.name == "nt":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            CREATE_NO_WINDOW = 0x08000000
+
+            creationflags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+
+            subprocess.Popen(
+                [sys.executable, str(script)],
+                cwd=str(base_dir),
+                env=env,
+                creationflags=creationflags
+            )
+        else:
+            subprocess.Popen(
+                [sys.executable, str(script)],
+                cwd=str(base_dir),
+                env=env
+            )
+        os._exit(0)
 
     # die process
-    def die(self):
-        reactor.stop()
+    def die(self, reason="Killed by !die"):
+        import os
+        import sys
+        from pathlib import Path
+        from twisted.internet import reactor
+
+        try:
+            self.sendLine(f"QUIT :{reason}")
+        except Exception:
+            pass
+
+        instance = os.getenv("BLACKBOT_INSTANCE_NAME", "main")
+        base_dir = Path(__file__).resolve().parent
+        pid_path = base_dir / "instances" / instance / f"{instance}.pid"
+
+        try:
+            if pid_path.exists():
+                pid_path.unlink()
+        except Exception:
+            pass
+
+        try:
+            reactor.stop()
+        except Exception:
+            pass
+        os._exit(0)
 
     def get_process(self, command):
         filtered_dicts = [my_dict for my_dict in self.commands if command in my_dict.values()]
@@ -1365,46 +1481,98 @@ class Bot(irc.IRCClient):
         stop_ev = get_event("known_users")
         while not stop_ev.is_set():
             time.sleep(1800)
-            active_nick_channel_pairs = set((c[0], c[1]) for c in self.channel_details)
+
+            active_pairs = {(ch, nick) for ch, nick, *_ in self.channel_details}
             before = len(self.known_users)
-            self.known_users.intersection_update(active_nick_channel_pairs)
+            self.known_users = {
+                (ch, nick) for (ch, nick) in self.known_users if (ch, nick) in active_pairs
+            }
             after = len(self.known_users)
-            if before != after:
-                print(f"🧹 Cleaned known_users: {before - after} entries removed")
+            removed = before - after
+            if removed > 0:
+                logger.info(f"🧹 Cleaned known_users: {removed} offline users removed, {after} still active")
 
     def rehash(self, channel, feedback, nick, host):
         import importlib
         import sys
         import gc
+        import traceback
 
-        result = self.check_command_access(channel, nick, host, '8', feedback)
-        if not result:
+        if not self.check_command_access(channel, nick, host, '8', feedback):
             return
+
+        def _short_tb():
+            tb = traceback.format_exc(limit=3)
+            short = " | ".join((tb or "").strip().splitlines()[-3:])
+            return (short[:400]) if short else "unknown error"
 
         try:
             self.send_message(feedback, "🔁 Reloading core modules...")
-
-            # Clear old command references
-            self.commands.clear()
-
-            # Reload all important modules
+            old_modules = {}
             modules_to_reload = [
-                'core.commands', 'core.update', 'core.SQL', 'core.Variables', 'settings', 'core.seen', 'core.dcc'
+                'core.commands',
+                'core.update',
+                'core.SQL',
+                'core.Variables',
+                'core.environment_config',
+                'core.seen',
+                'core.dcc',
+                'core.log',
+                'core.nettools',
+                'core.monitor_client',
+                'core.optimized_cache'
             ]
             for mod_name in modules_to_reload:
-                mod = sys.modules.get(mod_name)
-                if mod:
-                    importlib.reload(mod)
-                else:
-                    self.send_message(feedback, f"⚠️ Module not loaded: {mod_name}")
+                if mod_name in sys.modules:
+                    old_modules[mod_name] = sys.modules[mod_name]
 
-            self.load_commands()
+            if hasattr(self, 'commands'):
+                self.commands.clear()
 
-            self.sql.selfbot = self
+            if hasattr(self, '_command_cache'):
+                self._command_cache.clear()
 
-            collected = gc.collect()
+            # Forțează GC înainte de reload
+            gc.collect()
 
-            self.send_message(feedback, f"✅ Reloaded successfully. 🧹 {collected} objects collected.")
+            failed = []
+            reloaded = []
+
+            for mod_name in modules_to_reload:
+                try:
+                    old_mod = old_modules.get(mod_name)
+                    if old_mod:
+                        for attr_name in list(vars(old_mod).keys()):
+                            if not attr_name.startswith('__'):
+                                try:
+                                    delattr(old_mod, attr_name)
+                                except:
+                                    pass
+                    if mod_name in sys.modules:
+                        importlib.reload(sys.modules[mod_name])
+                    else:
+                        importlib.import_module(mod_name)
+
+                    reloaded.append(mod_name)
+
+                except Exception:
+                    self.send_message(feedback, f"⚠️ Module not loaded: {mod_name} → {_short_tb()}")
+                    failed.append(mod_name)
+            for _ in range(3):
+                collected = gc.collect()
+            try:
+                self.load_commands()
+            except Exception:
+                self.send_message(feedback, f"⚠️ load_commands failed → {_short_tb()}")
+            try:
+                self.sql.selfbot = self
+            except Exception:
+                pass
+
+            if failed:
+                self.send_message(feedback, f"ℹ️ Reloaded: {len(reloaded)} ok, {len(failed)} failed.")
+            self.send_message(feedback, f"✅ Reloaded successfully. 🧹 Memory cleanup completed.")
+
         except Exception as e:
             self.send_message(feedback, f"❌ Reload failed: {e}")
 
@@ -1418,28 +1586,22 @@ class Bot(irc.IRCClient):
                 local_version = update.read_local_version()
                 remote_version = update.fetch_remote_version()
                 if remote_version and remote_version > local_version:
-                    print(f"🔄 Update found → {remote_version} > {local_version}")
+                    logger.info(f"🔄 Update found → {remote_version} > {local_version}")
                     update.update_from_github(self, "Auto-update")
                     self.restart("🔁 Auto-updated")
                     break
             except Exception as e:
-                print(f"⚠️ Auto-update thread error: {e}")
+                logger.error(f"⚠️ Auto-update thread error: {e}")
             time.sleep(s.autoUpdateInterval * 60)
 
 
 class BotFactory(protocol.ReconnectingClientFactory):
-    """
-    Factory care rotește prin lista de servere (settings.servers) atât la deconectare,
-    cât și dacă nu se poate conecta inițial.
-    """
     def __init__(self, nickname, realname):
         self.nickname = nickname
         self.realname = realname
         self.away = s.away
         self.server = None
         self.port = None
-
-        # parametrii de backoff ai ReconnectingClientFactory (folosești resetDelay când te reconectezi cu succes)
         self.initialDelay = 1.0
         self.maxDelay = 60.0
         self.factor = 1.5
@@ -1460,26 +1622,25 @@ class BotFactory(protocol.ReconnectingClientFactory):
 
     def rotate_and_connect(self):
         host, port, vhost = server_next_round_robin()
-        print(f"🔁 Reconnecting to {host}:{port} (vhost={vhost}) ...")
+        logger.info(f"🔁 Reconnecting to {host}:{port} (vhost={vhost}) ...")
         self.connect_to(host, port, vhost)
 
     def connect_to(self, host, port, vhost):
-        """Conectează la (host,port) și setează meta pentru protocol."""
         self.server = vhost
         self.port = int(port)
-        if s.ssl_use == 1:
+        if s.ssl_use:
             sslContext = ssl.ClientContextFactory()
             reactor.connectSSL(host, int(port), self, sslContext)
         else:
             reactor.connectTCP(host, int(port), self)
 
     def clientConnectionLost(self, connector, reason):
-        print(f"Connection lost: {reason}. Rotating server & reconnecting...")
+        logger.info(f"Connection lost: {reason}. Rotating server & reconnecting...")
         v.connected = False
         self.rotate_and_connect()
 
     def clientConnectionFailed(self, connector, reason):
-        print(f"Connection failed: {reason}. Rotating server & retrying...")
+        logger.info(f"Connection failed: {reason}. Rotating server & retrying...")
         v.connected = False
         self.rotate_and_connect()
 
@@ -1507,7 +1668,6 @@ def host_resolve(host):
         flag = 1
     except ipaddress.AddressValueError:
         pass
-    # check if hostname is resolved as IPv6 or Ipv4
     resolved = 0
     if flag == -1:
         try:
@@ -1547,7 +1707,7 @@ def server_connect(first_server):  # connect to server
         ssocket = socket.AF_INET6
     else:
         ssocket = socket.AF_INET
-    if len(Starter.old_source) > 0:
+    if len(old_source) > 0:
         with socket.socket(ssocket, socket.SOCK_STREAM) as sk:
             sk.bind((s.sourceIP, s.sourcePort))  # Bind to the desired source IP
             sk.connect((server, port))
@@ -1561,11 +1721,11 @@ def server_choose_to_connect():
         first_server = s.servers[servers_order]
         connect = server_connect(first_server)
         if connect == 0:
-            print(f"No more servers to try. Ending bot.")
+            logger.info(f"No more servers to try. Ending bot.")
             server = -1
             break
         elif connect == 1:
-            print(f"Invalid server {first_server} from the list, trying another one..")
+            logger.info(f"Invalid server {first_server} from the list, trying another one..")
             servers_order += 1
             if servers_order >= len(s.servers):
                 servers_order = 0
@@ -1580,3 +1740,45 @@ def server_next_round_robin():
         raise RuntimeError("No servers configured.")
     servers_order = (servers_order + 1) % len(s.servers)
     return server_choose_to_connect()
+
+
+class ClientSSLContext(ssl.ClientContextFactory):
+    def getContext(self):
+        ctx = ssl.ClientContextFactory.getContext(self)
+        cert = s.ssl_cert_file
+        key = s.ssl_key_file
+
+        if cert and key and os.path.isfile(cert) and os.path.isfile(key):
+            try:
+                ctx.use_certificate_file(cert)
+                ctx.use_privatekey_file(key)
+                logger.debug("🔐 Loaded SSL certificate and key for mutual TLS.")
+            except Exception as e:
+                logger.error(f"❌ Failed to load SSL cert/key: {e}")
+                sys.exit(1)
+        return ctx
+
+if __name__ == '__main__':
+    from pathlib import Path
+    import os
+    instance = os.getenv("BLACKBOT_INSTANCE_NAME", "main")
+    base_dir = Path(__file__).resolve().parent
+    try:
+        pid_path = base_dir / "instances" / instance / f"{instance}.pid"
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(pid_path, "w", encoding="utf-8", errors="replace") as f:
+            f.write(str(os.getpid()))
+    except Exception as e:
+        logger.warning(f"[PID] Failed to update pid file: {e!r}")
+
+    old_source = s.sourceIP
+
+    if not s.servers:
+        logger.error("❌ No servers in list to connect to.")
+        exit(1)
+
+    host, port, vhost = server_choose_to_connect()
+    factory = BotFactory(s.nickname, s.realname)
+    factory.connect_to(host, port, vhost)
+    logger.debug(f"🚀 BlackBoT started successfully! Connecting to {host}:{port}")
+    reactor.run()

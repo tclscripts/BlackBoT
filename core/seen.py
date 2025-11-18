@@ -1,6 +1,6 @@
 # core/seen.py
 import time
-from typing import Optional, Tuple, List
+from typing import Optional
 
 def format_seen_stats(sql, botId: int, channel_hint: str | None = None) -> str:
     total = sql.sqlite_select("SELECT COUNT(*) FROM SEEN WHERE botId=?", (botId,))[0][0]

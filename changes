@@ -57,5 +57,13 @@
 # added option to not enter to channels, only on main, if not identifed to nickserv
 # solved issues regarding auto login for more than 1 user with the same host
 # solved issues related to auto update
+# added log module to add debug, warnings, error messages to logs
+# added !dns, !ip, !ping, !asn commands.
+# added thread guardian to maintain them active
+# updated status command
+# optimized cache implemented
+# added Launcher that implements the possibility to have multiple robots on same archive
+# solved running in background for linux & windows
+# solved other bugs
 ----------------------------------------------------------------------------------
 

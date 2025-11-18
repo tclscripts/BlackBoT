@@ -3,6 +3,9 @@ import sqlite3
 import Variables as v
 import datetime
 import threading
+from core.log import get_logger
+
+logger = get_logger("sql")
 
 class SQL:
     def __init__(self, sqlite3_database):
@@ -11,78 +14,88 @@ class SQL:
         self._conn = self._create_persistent_connection()
 
     def _create_persistent_connection(self):
-        conn = sqlite3.connect(
-            self.database,
-            check_same_thread=False,      # folosești threading în bot
-            isolation_level=None,         # autocommit controlat manual prin BEGIN/COMMIT când vrei
-            timeout=5.0,                  # evită "database is locked"
-            detect_types=0
-        )
-        # PRAGMA-uri
-        conn.execute("PRAGMA foreign_keys=ON;")
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA temp_store=MEMORY;")
-        conn.execute("PRAGMA cache_size=-2000;")   # ~2MB (ajustabil din settings)
-        conn.execute("PRAGMA busy_timeout=3000;")  # 3s
-        # (opțional, pe SSD și dacă e ok) conn.execute("PRAGMA mmap_size=268435456;")  # 256MB
-        return conn
+        try:
+            conn = sqlite3.connect(
+                self.database,
+                check_same_thread=False,
+                isolation_level=None,
+                timeout=5.0,
+                detect_types=0
+            )
+            conn.execute("PRAGMA foreign_keys=ON;")
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA temp_store=MEMORY;")
+            conn.execute("PRAGMA cache_size=-2000;")
+            conn.execute("PRAGMA busy_timeout=3000;")
+            return conn
+        except Exception as e:
+            logger.error("SQLite connection failed for '%s': %s", self.database, e, exc_info=True)
+            raise
 
     def create_connection(self):
-        # păstrezi compatibilitatea cu restul codului
         return self._conn
 
     ##
     # execute method
     def sqlite3_execute(self, sql):
-        connection = self.create_connection()
-        cursor = connection.cursor()
-        try:
-            out = cursor.execute(sql)
-            connection.commit()
-        finally:
-            cursor.close()
-            
-        return out
+        with self._lock:
+            conn = self.create_connection()
+            cur = conn.cursor()
+            try:
+                out = cur.execute(sql)
+                conn.commit()
+                return out
+            except Exception as e:
+                logger.error("EXEC failed: %s | error=%s", sql, e, exc_info=True)
+                raise
+            finally:
+                cur.close()
 
-    def sqlite3_update(self, sql, what):  # update sql
-        connection = self.create_connection()
-        cursor = connection.cursor()
-        try:
-            out = cursor.execute(sql, what)
-            connection.commit()
-        finally:
-            cursor.close()
-            
-        return out
+    def sqlite3_update(self, sql, params):
+        with self._lock:
+            conn = self.create_connection()
+            cur = conn.cursor()
+            try:
+                out = cur.execute(sql, params)
+                conn.commit()
+                return out
+            except Exception as e:
+                logger.error("UPDATE failed: %s | params=%s | error=%s", sql, params, e, exc_info=True)
+                raise
+            finally:
+                cur.close()
 
-    ##
-    # execute method
-    def sqlite3_insert(self, sql, data):  # insert sql
-        connection = self.create_connection()
-        cursor = connection.cursor()
-        try:
-            cursor.execute(sql, data)
-            last_row_id = cursor.lastrowid
-            connection.commit()
-        finally:
-            cursor.close()
-        return last_row_id
+    def sqlite3_insert(self, sql, params):
+        with self._lock:
+            conn = self.create_connection()
+            cur = conn.cursor()
+            try:
+                cur.execute(sql, params)
+                last_row_id = cur.lastrowid
+                conn.commit()
+                return last_row_id
+            except Exception as e:
+                logger.error("INSERT failed: %s | params=%s | error=%s", sql, params, e, exc_info=True)
+                raise
+            finally:
+                cur.close()
 
-    ##
-    # select method
     def sqlite_select(self, query, params=None):
-        connection = self.create_connection()
-        cursor = connection.cursor()
-        try:
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
-            result = cursor.fetchall()
-        finally:
-            cursor.close()
-        return result
+        with self._lock:
+            conn = self.create_connection()
+            cur = conn.cursor()
+            try:
+                if params is not None:
+                    cur.execute(query, params)
+                else:
+                    cur.execute(query)
+                return cur.fetchall()
+            except Exception as e:
+                logger.error("SELECT failed: %s | params=%s | error=%s", query, params, e, exc_info=True)
+                raise
+            finally:
+                cur.close()
 
     def sqlite_add_ban(self, *,
                        botId,
@@ -393,8 +406,10 @@ class SQL:
             return True
         return False
 
-    def sqlite_update_uptime(self, selfbot, botId):
-        while True:
+    # ✅ MODIFICAT: guardian-ready (stop_event, beat) + așteptare întreruptibilă
+    def sqlite_update_uptime(self, selfbot, botId, stop_event, beat):
+        while not stop_event.is_set():
+            beat()  # puls pentru supraveghere
             timestamp = time.time()
             uptime_duration = int(timestamp - selfbot.current_start_time) if selfbot.current_start_time else 0
             connect_duration = int(timestamp - selfbot.current_connect_time) if selfbot.current_connect_time else 0
@@ -402,19 +417,24 @@ class SQL:
             current_max_uptime = self.sqlite_get_max_uptime(botId)
             current_max_connect = self.sqlite_get_max_ontime(botId)
 
-            if uptime_duration > current_max_uptime:
-                self.sqlite3_insert(
-                    "UPDATE BOTSETTINGS SET maxUptime = ? WHERE botId = ?",
-                    (uptime_duration, botId)
-                )
+            try:
+                if uptime_duration > current_max_uptime:
+                    self.sqlite3_insert(
+                        "UPDATE BOTSETTINGS SET maxUptime = ? WHERE botId = ?",
+                        (uptime_duration, botId)
+                    )
 
-            if selfbot.connected and connect_duration > current_max_connect:
-                self.sqlite3_insert(
-                    "UPDATE BOTSETTINGS SET maxConnectTime = ? WHERE botId = ?",
-                    (connect_duration, botId)
-                )
+                if getattr(selfbot, "connected", False) and connect_duration > current_max_connect:
+                    self.sqlite3_insert(
+                        "UPDATE BOTSETTINGS SET maxConnectTime = ? WHERE botId = ?",
+                        (connect_duration, botId)
+                    )
+            except Exception as e:
+                logger.error("uptime loop error: %s", e, exc_info=True)
 
-            time.sleep(60)
+            # înlocuiește sleep(60) cu așteptare întreruptibilă
+            if stop_event.wait(60):
+                break
 
     def sqlite_get_max_uptime(self, botId):  # get maximum uptime
         query = "SELECT maxUptime from BOTSETTINGS where botId = '{}'".format(botId)
@@ -1047,4 +1067,3 @@ class SQL:
         ]
         for q in indexes:
             self.sqlite3_execute(q)
-###
