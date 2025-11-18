@@ -836,7 +836,6 @@ BLACKBOT_MANAGER_VERSION="Unified Manager 2.0"
                     this_script = _P(sys.argv[0]).name
                     print_success(f"Instance '{name}' started successfully (PID: {process.pid})")
                     print_info(f"📋 Log file: {config.log_file}")
-                    print_info(f"🛑 Stop with: {py_cmd} {this_script} stop {name}")
                     return True
                 else:
                     print_error(f"Instance '{name}' failed to start")
@@ -1130,7 +1129,7 @@ def show_main_menu(manager: UnifiedBlackBotManager):
         print("  11. ❌ Exit")
 
         try:
-            choice = input(f"\n{Colors.CYAN}Choose action [1-12]: {Colors.END}").strip()
+            choice = input(f"\n{Colors.CYAN}Choose action [1-11]: {Colors.END}").strip()
 
             if choice == "1":
                 manager.create_instance_interactive()
