@@ -98,57 +98,6 @@ class HybridBlackBotLauncher:
         print_info(f"🤖 Unified manager: {'✅' if self.has_unified_manager else '❌'}")
         print_info(f"🐍 Virtual env: {'✅' if self.venv_dir.exists() else '❌'} ({self.venv_dir})")
 
-        # One-time migration if needed
-        self.auto_migrate_legacy_settings()
-
-    # -------------------------------------------------------------------------
-    # ONE-TIME MIGRATION FROM settings.py → instances/*
-    # -------------------------------------------------------------------------
-    def auto_migrate_legacy_settings(self):
-        """
-        If legacy settings.py exists and no instances.json yet, run migrate.py once.
-        This converts the old single-bot config into a new instance directory.
-        """
-        settings_py = self.base_dir / "settings.py"
-        instances_json = self.base_dir / "instances.json"
-
-        if not settings_py.exists():
-            return  # nothing to migrate
-
-        if instances_json.exists():
-            # Already migrated / instances defined
-            return
-
-        print_header("🧭 Legacy Configuration Detected")
-        print_warning("Found legacy settings.py but no instances.json.")
-        print_info("A one-time migration will create a new instance from settings.py using migrate.py")
-
-        # Ensure venv + deps first so migrate.py runs in same environment
-        if not self.venv_dir.exists() or not self.python_exec.exists():
-            print_info("Setting up virtual environment before migration...")
-            if not self.setup_virtual_environment():
-                print_error("Cannot run migration without a valid virtual environment.")
-                return
-            self.install_packages()
-
-        migrate_script = self.base_dir / "migrate.py"
-        if not migrate_script.exists():
-            print_error("migrate.py not found; cannot auto-migrate legacy settings.py.")
-            return
-
-        try:
-            cmd = [str(self.python_exec), "migrate.py"]
-            env = os.environ.copy()
-            env = self._venv_path_in_env(env)
-            print_info("Running migrate.py to convert settings.py → instances/* ...")
-            result = subprocess.run(cmd, cwd=self.base_dir, env=env)
-            if result.returncode == 0:
-                print_success("Legacy migration completed successfully.")
-            else:
-                print_error(f"Migration failed with exit code {result.returncode}")
-        except Exception as e:
-            print_error(f"Failed to run migrate.py: {e!r}")
-
     # -------------------------------------------------------------------------
     # ENVIRONMENT SETUP
     # -------------------------------------------------------------------------
