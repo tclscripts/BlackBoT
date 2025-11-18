@@ -1,6 +1,7 @@
 # 🤖 BlackBoT – Modern IRC Bot with Multi‑Instance Manager
 
 Welcome to **BlackBoT**, a modular, modern, multi‑instance capable IRC bot written in Python.
+
 Check https://uptime.tclscripts.net for BoT Uptime Contest
 
 ---
