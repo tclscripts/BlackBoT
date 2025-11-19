@@ -1712,14 +1712,22 @@ def server_connect(first_server):  # connect to server
     else:
         t = irc_server[0]
         server = irc_server[1]
-    if t == 1:
-        ssocket = socket.AF_INET6
-    else:
-        ssocket = socket.AF_INET
     if len(old_source) > 0:
+        src_ip = s.sourceIP
+        if ":" in src_ip:
+            ssocket = socket.AF_INET6
+            bind_addr = (src_ip, s.sourcePort, 0, 0)  # IPv6 tuple
+        else:
+            ssocket = socket.AF_INET
+            bind_addr = (src_ip, s.sourcePort)  # IPv4 tuple
+        if t == 1:
+            connect_addr = (server, port, 0, 0)
+        else:
+            connect_addr = (server, port)
+
         with socket.socket(ssocket, socket.SOCK_STREAM) as sk:
-            sk.bind((s.sourceIP, s.sourcePort))  # Bind to the desired source IP
-            sk.connect((server, port))
+            sk.bind(bind_addr)
+            sk.connect(connect_addr)
     return [server, port, irc_server[2]]
 
 
