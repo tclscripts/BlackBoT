@@ -157,19 +157,38 @@ class DCCManager:
 
     # ---------- utils ----------
     def _best_local_v4(self) -> str:
+        ip = None
+
         try:
-            ip = getattr(self.bot, "public_ip", None) or getattr(self.bot, "sourceIP", None)
+            cand = getattr(self.bot, "public_ip", None)
         except Exception:
-            ip = None
-        if not ip:
+            cand = None
+        if cand:
             try:
-                sck = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                sck.connect(("8.8.8.8", 80))
-                ip = sck.getsockname()[0]
-                sck.close()
-            except Exception:
-                ip = "127.0.0.1"
+                ipaddress.IPv4Address(cand)
+                return cand
+            except ipaddress.AddressValueError:
+                pass
+        try:
+            cand = getattr(self.bot, "sourceIP", None)
+        except Exception:
+            cand = None
+        if cand:
+            try:
+                ipaddress.IPv4Address(cand)
+                return cand
+            except ipaddress.AddressValueError:
+                pass
+        try:
+            sck = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sck.connect(("8.8.8.8", 80))
+            ip = sck.getsockname()[0]
+            sck.close()
+        except Exception:
+            ip = "127.0.0.1"
+
         return ip
+
 
     def _pick_port(self) -> int:
         return self.fixed_port or random.randint(self.port_min, self.port_max)
