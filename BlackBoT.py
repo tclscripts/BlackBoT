@@ -1637,11 +1637,28 @@ class BotFactory(protocol.ReconnectingClientFactory):
     def connect_to(self, host, port, vhost):
         self.server = vhost
         self.port = int(port)
+
+        bind_addr = None
+        if getattr(s, "sourceIP", ""):
+            try:
+                bind_port = int(getattr(s, "sourcePort", 0) or 0)
+            except ValueError:
+                bind_port = 0
+
+            # pentru Twisted e suficient (ip, port); IPv4 sau IPv6
+            bind_addr = (s.sourceIP, bind_port)
+
         if s.ssl_use:
             sslContext = ssl.ClientContextFactory()
-            reactor.connectSSL(host, int(port), self, sslContext)
+            if bind_addr:
+                reactor.connectSSL(host, int(port), self, sslContext, bindAddress=bind_addr)
+            else:
+                reactor.connectSSL(host, int(port), self, sslContext)
         else:
-            reactor.connectTCP(host, int(port), self)
+            if bind_addr:
+                reactor.connectTCP(host, int(port), self, bindAddress=bind_addr)
+            else:
+                reactor.connectTCP(host, int(port), self)
 
     def clientConnectionLost(self, connector, reason):
         logger.info(f"Connection lost: {reason}. Rotating server & reconnecting...")
