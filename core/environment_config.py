@@ -399,6 +399,9 @@ class EnvironmentConfig:
         db_path = Path(self.config['sqlite3_database'])
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
+        if not self.config.get('dcc_public_ip') and self.config.get('sourceIP'):
+            self.config['dcc_public_ip'] = self.config['sourceIP']
+
     def _show_config_summary(self):
         """Show configuration summary"""
         safe_print(f"🤖 BlackBoT Configuration Summary")

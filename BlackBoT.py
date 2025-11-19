@@ -1634,18 +1634,16 @@ class BotFactory(protocol.ReconnectingClientFactory):
         logger.info(f"🔁 Reconnecting to {host}:{port} (vhost={vhost}) ...")
         self.connect_to(host, port, vhost)
 
+
     def connect_to(self, host, port, vhost):
         self.server = vhost
         self.port = int(port)
 
-        # dacă avem SOURCE_IP setat, îl folosim ca bindAddress
+        # Folosim SOURCE_IP doar ca IP local; port 0 => OS alege random
         bind_addr = None
-        if getattr(s, "sourceIP", ""):
-            try:
-                bind_port = int(getattr(s, "sourcePort", 0) or 0)
-            except ValueError:
-                bind_port = 0
-            bind_addr = (s.sourceIP, bind_port)
+        source_ip = getattr(s, "sourceIP", "") or ""
+        if source_ip:
+            bind_addr = (source_ip, 0)  # port 0 = "alege tu, OS"
 
         if s.ssl_use:
             sslContext = ssl.ClientContextFactory()
@@ -1658,6 +1656,7 @@ class BotFactory(protocol.ReconnectingClientFactory):
                 reactor.connectTCP(host, int(port), self, bindAddress=bind_addr)
             else:
                 reactor.connectTCP(host, int(port), self)
+
 
 
     def clientConnectionLost(self, connector, reason):
