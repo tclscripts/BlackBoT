@@ -1638,14 +1638,13 @@ class BotFactory(protocol.ReconnectingClientFactory):
         self.server = vhost
         self.port = int(port)
 
+        # dacă avem SOURCE_IP setat, îl folosim ca bindAddress
         bind_addr = None
         if getattr(s, "sourceIP", ""):
             try:
                 bind_port = int(getattr(s, "sourcePort", 0) or 0)
             except ValueError:
                 bind_port = 0
-
-            # pentru Twisted e suficient (ip, port); IPv4 sau IPv6
             bind_addr = (s.sourceIP, bind_port)
 
         if s.ssl_use:
@@ -1659,6 +1658,7 @@ class BotFactory(protocol.ReconnectingClientFactory):
                 reactor.connectTCP(host, int(port), self, bindAddress=bind_addr)
             else:
                 reactor.connectTCP(host, int(port), self)
+
 
     def clientConnectionLost(self, connector, reason):
         logger.info(f"Connection lost: {reason}. Rotating server & reconnecting...")
@@ -1684,6 +1684,8 @@ def server_has_port(server):
 def host_resolve(host):
     flag = -1
     vserver = host
+
+    # dacă host e deja IP literal
     try:
         ipaddress.IPv4Address(host)
         flag = 0
@@ -1694,25 +1696,53 @@ def host_resolve(host):
         flag = 1
     except ipaddress.AddressValueError:
         pass
-    resolved = 0
+
+    # vrem să știm dacă avem un SOURCE IPv6 setat
+    prefer_ipv6 = False
+    try:
+        if getattr(s, "sourceIP", ""):
+            ipaddress.IPv6Address(s.sourceIP)
+            prefer_ipv6 = True
+    except ipaddress.AddressValueError:
+        pass
+
     if flag == -1:
-        try:
-            ip_address = socket.gethostbyname(host)
-            resolved = 1
-            return [0, ip_address, vserver]
-        except socket.gaierror:
-            pass
-        if resolved == 0:
+        # host este nume (nu IP literal)
+        if prefer_ipv6:
+            # ÎNTÂI încercăm IPv6
             try:
                 results = socket.getaddrinfo(host, None, socket.AF_INET6)
-                ipv6_addresses = [result[4][0] for result in results if result[1] == socket.SOCK_STREAM]
-                return [1, ipv6_addresses[0], vserver]
+                ipv6_addresses = [r[4][0] for r in results if r[1] == socket.SOCK_STREAM]
+                if ipv6_addresses:
+                    return [1, ipv6_addresses[0], vserver]
+            except socket.gaierror:
+                pass
+
+            # dacă nu merge IPv6, încercăm IPv4 ca fallback
+            try:
+                ip_address = socket.gethostbyname(host)
+                return [0, ip_address, vserver]
             except socket.gaierror:
                 return -1
         else:
-            return -1
+            # comportament „clasic”: IPv4 -> IPv6
+            try:
+                ip_address = socket.gethostbyname(host)
+                return [0, ip_address, vserver]
+            except socket.gaierror:
+                pass
+            try:
+                results = socket.getaddrinfo(host, None, socket.AF_INET6)
+                ipv6_addresses = [r[4][0] for r in results if r[1] == socket.SOCK_STREAM]
+                if ipv6_addresses:
+                    return [1, ipv6_addresses[0], vserver]
+                return -1
+            except socket.gaierror:
+                return -1
     else:
+        # host e deja IP (v4 sau v6)
         return [flag, host, vserver]
+
 
 
 def server_connect(first_server):  # connect to server
