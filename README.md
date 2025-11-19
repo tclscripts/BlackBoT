@@ -115,7 +115,6 @@ Access is based on **flags** stored in the SQLite DB:
 * `O` – Op
 * `V` – Voice
 * `P` – Protected
-
 Each command lists the flags required. Use `!help command` to check.
 
 ---
