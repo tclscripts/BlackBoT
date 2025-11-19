@@ -772,7 +772,7 @@ class Bot(irc.IRCClient):
 
                 if not self.logged_in_users:
                     logger.info("✅ No more logged-in users. Monitor thread exiting.")
-                    self.thread_check_logged_users_started = False
+                    stop_event.set()
                     break
 
                 if not getattr(self, "channels", None):
@@ -786,7 +786,6 @@ class Bot(irc.IRCClient):
                 except Exception as e:
                     logger.info(f"⚠️ Exception in user cleaner thread: {e}")
 
-                # așteaptă întreruptibil până la următorul ciclu
                 if stop_event.wait(min(full_interval, 30)):
                     break
         finally:

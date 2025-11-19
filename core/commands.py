@@ -715,17 +715,15 @@ def cmd_auth(self, channel, feedback, nick, host, msg):
                     f"✅ Welcome, {username}. You are now logged in from {host}."
                 )
 
-                # Start logged_users monitor if not started
                 if not getattr(self, "thread_check_logged_users_started", False):
+                    self.thread_check_logged_users_started = True
                     self.thread_check_logged_users = ThreadWorker(
                         target=self._check_logged_users_loop,
                         name="logged_users",
                         supervise=True,
                         provide_signals=True,
-                        heartbeat_timeout=300,
-                        min_interval=1.0
+                        heartbeat_timeout=600,
                     )
-                    self.thread_check_logged_users_started = True
                     self.thread_check_logged_users.start()
             else:
                 reactor.callFromThread(self.send_message, feedback, "❌ Incorrect username or password.")
