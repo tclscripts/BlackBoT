@@ -1700,9 +1700,10 @@ def host_resolve(host):
 
 def server_connect(first_server):  # connect to server
     global servers_order
+
     check_if_port = server_has_port(first_server)
     first_server = check_if_port[0]
-    port = check_if_port[1]
+    port = int(check_if_port[1])
 
     irc_server = host_resolve(first_server)
     if irc_server == -1:
@@ -1710,17 +1711,26 @@ def server_connect(first_server):  # connect to server
             return 0
         return 1
     else:
-        t = irc_server[0]
-        server = irc_server[1]
-    if len(old_source) > 0:
+        t = irc_server[0]      # 0 = v4, 1 = v6
+        server = irc_server[1] # IP-ul (v4 sau v6)
+        vhost = irc_server[2]
+
+    if t == 1:
+        ssocket = socket.AF_INET6
+    else:
+        ssocket = socket.AF_INET
+
+    if len(old_source) > 0 and s.sourceIP:
         src_ip = s.sourceIP
+        src_port = int(getattr(s, "sourcePort", 0) or 0)
+
         if ":" in src_ip:
-            ssocket = socket.AF_INET6
-            bind_addr = (src_ip, s.sourcePort, 0, 0)  # IPv6 tuple
+            bind_addr = (src_ip, src_port, 0, 0)   # IPv6
         else:
-            ssocket = socket.AF_INET
-            bind_addr = (src_ip, s.sourcePort)  # IPv4 tuple
-        if t == 1:
+            bind_addr = (src_ip, src_port)         # IPv4
+
+        # tuple corectă pentru connect (IPv4/IPv6)
+        if ssocket == socket.AF_INET6:
             connect_addr = (server, port, 0, 0)
         else:
             connect_addr = (server, port)
@@ -1728,7 +1738,9 @@ def server_connect(first_server):  # connect to server
         with socket.socket(ssocket, socket.SOCK_STREAM) as sk:
             sk.bind(bind_addr)
             sk.connect(connect_addr)
-    return [server, port, irc_server[2]]
+
+    return [server, port, vhost]
+
 
 
 def server_choose_to_connect():

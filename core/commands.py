@@ -1012,7 +1012,7 @@ def cmd_restart(self, channel, feedback, nick, host, msg):
     if not result:
         return
     self.send_message(feedback, "Restarting...")
-    threading.Timer(3, self.restart).start()
+    self.restart("🔁 Restart by command")
 
 
 def cmd_cycle(self, channel, feedback, nick, host, msg):
