@@ -1758,36 +1758,10 @@ def server_connect(first_server):  # connect to server
             return 0
         return 1
     else:
-        t = irc_server[0]      # 0 = v4, 1 = v6
-        server = irc_server[1] # IP-ul (v4 sau v6)
+        # irc_server = [flag, ip, vhost]
+        server = irc_server[1]
         vhost = irc_server[2]
-
-    if t == 1:
-        ssocket = socket.AF_INET6
-    else:
-        ssocket = socket.AF_INET
-
-    if len(old_source) > 0 and s.sourceIP:
-        src_ip = s.sourceIP
-        src_port = int(getattr(s, "sourcePort", 0) or 0)
-
-        if ":" in src_ip:
-            bind_addr = (src_ip, src_port, 0, 0)   # IPv6
-        else:
-            bind_addr = (src_ip, src_port)         # IPv4
-
-        # tuple corectă pentru connect (IPv4/IPv6)
-        if ssocket == socket.AF_INET6:
-            connect_addr = (server, port, 0, 0)
-        else:
-            connect_addr = (server, port)
-
-        with socket.socket(ssocket, socket.SOCK_STREAM) as sk:
-            sk.bind(bind_addr)
-            sk.connect(connect_addr)
-
     return [server, port, vhost]
-
 
 
 def server_choose_to_connect():
