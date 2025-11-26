@@ -106,7 +106,7 @@ from core.dcc import DCCManager
 from core.optimized_cache import SmartTTLCache
 from core.monitor_client import ensure_enrollment, send_heartbeat, send_monitor_offline
 from core.log import get_logger, install_excepthook, log_session_banner
-
+from core.ban_expiration_manager import BanExpirationManager
 
 # ═══════════════════════════════════════════════════════════════════
 # Initialize Configuration System
@@ -173,7 +173,7 @@ class Bot(irc.IRCClient):
         self.current_connect_time = 0
         self.current_start_time = 0
         self.recover_nick_timer_start = False
-        self.connected = False  # devine True în connectionMade, False în connectionLost
+        self.connected = False
         self.channel_details = []
         self.nickname = nickname
         self.realname = realname
@@ -199,10 +199,18 @@ class Bot(irc.IRCClient):
         self.clean_logged_users(silent=True)
         self.thread_check_logged_users_started = False
         self.known_users = set()  # (channel, nick)
+        self.who_lock = threading.RLock()
+        self.who_queue = {}
+        self.who_replies = {}
         self.user_cache = SmartTTLCache(
             maxlen=2000, ttl=6 * 3600, adaptive_ttl=True,
             background_cleanup=False, enable_stats=True
         )
+        self.channel_op_state = {}
+        self.pending_ban_checks = {}
+        self.pending_ban_max_age = 3600
+        self.pending_ban_max_per_channel = 200
+        self.pending_ban_global_max = 2000
         self.flood_tracker = defaultdict(lambda: deque())
         self.current_start_time = time.time()
         self.sqlite3_database = s.sqlite3_database
@@ -243,6 +251,9 @@ class Bot(irc.IRCClient):
             idle_timeout=getattr(s, "dcc_idle_timeout", 600),
             allow_unauthed=bool(getattr(s, "dcc_allow_unauthed", False)),
         )
+
+        # Initialize ban expiration manager
+        self.ban_expiration_manager = BanExpirationManager(self)
 
     def _init_worker_registry(self):
         self._workers = {}
@@ -327,20 +338,9 @@ class Bot(irc.IRCClient):
     def irc_sendline(self, line: str):
         self._on_reactor(self.sendLine, line.encode("utf-8"))
 
-    def irc_RPL_WHOISUSER(self, prefix, params):
-        # params: [me, nick, user, host, '*', realname]
-        _, nick, user, host, _, realname = params
-        self.pending_whois[nick] = {
-            'nick': nick,
-            'user': user,
-            'host': host,
-            'realname': realname
-        }
-
-    def irc_RPL_ENDOFWHOIS(self, prefix, params):
-        nick = params[1]
-        if nick not in self.pending_whois:
-            self.pending_whois[nick] = None
+    def irc_ERROR(self, prefix, params):
+        msg = " ".join(params) if params else ""
+        self.logger.error(f"❌ IRC ERROR from server: {msg}")
 
     def _monitor_init_worker(self):
         try:
@@ -457,14 +457,20 @@ class Bot(irc.IRCClient):
         self.join(name)
 
     def userQuit(self, user, message):
+        # user este de forma "nick!ident@host"
+        nick = user.split('!')[0]
+
         if self.channel_details:
             self.channel_details = [
-                arr for arr in self.channel_details if arr[1].lower() != user.lower()
+                arr for arr in self.channel_details if arr[1].lower() != nick.lower()
             ]
-        self.logoutOnQuit(user)
-        nick = user.split('!')[0]
+
+        # logout logic bazat pe nick (și host normalizat)
+        self.logoutOnQuit(nick)
+
         ident, host = self._get_any_ident_host(nick)
         seen.on_quit(self.sql, self.botId, nick, message, ident=ident, host=host)
+        self._remove_from_pending(nick)
 
 
     def signedOn(self):
@@ -485,6 +491,10 @@ class Bot(irc.IRCClient):
         self.connected = True
         self.current_connect_time = time.time()
         self.sendLine("AWAY :" + s.away)
+        # Start ban expiration manager
+        if hasattr(self, 'ban_expiration_manager'):
+            self.ban_expiration_manager.start()
+            logger.info("✅ Ban expiration manager started")
         if s.nickserv_login_enabled:
             self.login_nickserv()
             if s.require_nickserv_ident:
@@ -498,11 +508,6 @@ class Bot(irc.IRCClient):
         except UnicodeDecodeError:
             return
         super().lineReceived(line)
-
-    # --- Conexiune socket Twisted ---
-    def connectionMade(self):
-        super().connectionMade()
-        self.connected = True
 
     def connectionLost(self, reason):
 
@@ -525,6 +530,14 @@ class Bot(irc.IRCClient):
         self._stop_worker("recover_nick")
         self._stop_worker("logged_users")
 
+        # Stop ban expiration manager
+        if hasattr(self, 'ban_expiration_manager'):
+            try:
+                self.ban_expiration_manager.stop()
+                logger.info("🛑 Ban expiration manager stopped")
+            except Exception as e:
+                logger.error(f"Error stopping ban expiration manager: {e}")
+
         self.monitor_enabled = False
         try:
             self._cancel_all_timers()
@@ -533,6 +546,19 @@ class Bot(irc.IRCClient):
 
         logger.info(
             f"🔌 Disconnected from IRC: {reason}. Heartbeat & per-connection workers stopped; global workers kept alive.")
+
+        # Stop ban expiration manager
+        if hasattr(self, 'ban_expiration_manager'):
+            try:
+                self.ban_expiration_manager.stop()
+                logger.info("🛑 Ban expiration manager stopped")
+            except Exception as e:
+                logger.error(f"Error stopping ban expiration manager: {e}")
+
+    # --- Conexiune socket Twisted ---
+    def connectionMade(self):
+        super().connectionMade()
+        self.connected = True
 
     def _ensure_channel_canonical_in_db(self, requested_name: str, canonical_name: str):
 
@@ -547,42 +573,149 @@ class Bot(irc.IRCClient):
         self.sql.sqlite3_addchan(canonical_name, self.username, self.botId)
 
     def joined(self, channel):
-        if self.notOnChannels and channel.lower() in (c.lower() for c in self.notOnChannels):
-            self.notOnChannels.remove(channel)
+        logger.info(f"✅ Joined channel: {channel}")
 
-        logger.info(f"Joined channel {channel}")
+        # Add channel to list if not present
+        if channel not in self.channels:
+            self.channels.append(channel)
 
+        # Remove from pending rejoin list
         if channel in self.rejoin_pending:
             del self.rejoin_pending[channel]
-        try:
-            requested = self.pending_join_requests.pop(channel.lower(), None)
-            self._ensure_channel_canonical_in_db(requested_name=requested, canonical_name=channel)
-        except Exception as e:
-            logger.info(f"[WARN] DB sync on join failed for {channel}: {e}")
 
-        self.sendLine(f"WHO {channel}")
+        # ÎMBUNĂTĂȚIRE: Auto-salvează canalul în baza de date dacă nu există
+        try:
+            if not self.sql.sqlite_validchan(channel):
+                self.sql.sqlite3_addchan(channel, self.username, self.botId)
+                logger.info(f"📋 Auto-saved channel {channel} to database")
+            else:
+                # Canalul există dar poate fi suspended -> reactivează-l
+                if self.sql.sqlite_is_channel_suspended(channel):
+                    logger.info(f"📋 Channel {channel} exists but is suspended")
+        except Exception as e:
+            logger.error(f"❌ Failed to auto-save channel {channel}: {e}")
+
+        # Cere WHO pentru a popula channel_details (nick, ident, host, realname)
+        try:
+            self.sendLine(f"WHO {channel}")
+        except Exception:
+            pass
+
+        # Programăm verificarea ban-urilor după ce WHO a avut timp să vină
+        if hasattr(self, 'ban_expiration_manager'):
+            def delayed_ban_check():
+                try:
+                    time.sleep(2)  # mic delay pentru răspunsurile WHO
+
+                    has_op = False
+                    try:
+                        has_op = self._has_channel_op(channel)
+                    except Exception:
+                        has_op = False
+
+                    if has_op:
+                        # ✅ avem +o → verificăm și banează direct userii care se potrivesc
+                        logger.info(f"🔍 Checking users in {channel} for active bans (bot has +o)")
+                        self.ban_expiration_manager.check_channel_users_on_join(channel)
+                    else:
+                        # ❌ nu avem +o → punem userii în pending, vor fi procesați când luăm op
+                        if not hasattr(self, "_queue_pending_ban_check"):
+                            logger.info(f"ℹ️ No pending-ban queue helper, skipping queued bans for {channel}")
+                            return
+
+                        members = []
+                        for row in self.channel_details:
+                            if not isinstance(row, (list, tuple)) or not row:
+                                continue
+                            if str(row[0]).lower() != channel.lower():
+                                continue
+
+                            nick = row[1] if len(row) > 1 else None
+                            ident = row[2] if len(row) > 2 else None
+                            host = row[3] if len(row) > 3 else None
+                            realname = row[5] if len(row) > 5 else None
+
+                            if nick:
+                                members.append((nick, ident, host, realname))
+
+                        queued = 0
+                        for nick, ident, host, realname in members:
+                            self._queue_pending_ban_check(
+                                channel,
+                                nick,
+                                ident or "*",
+                                host or "*",
+                                realname,
+                            )
+                            queued += 1
+
+                        if queued:
+                            logger.info(f"🕓 No +o on {channel}, queued {queued} users for ban re-check once we get op.")
+                except Exception as e:
+                    logger.error(f"delayed_ban_check error for {channel}: {e}", exc_info=True)
+
+            import threading
+            threading.Thread(target=delayed_ban_check, daemon=True).start()
 
     def userJoined(self, user, channel):
+        # DEBUG de bază
+        logger.info(f"[DEBUG] userJoined CALLED for {user} on {channel}")
 
-        if self.channel_details:
-            self.sendLine(f"WHO {user}")
-
+        # Parse user info
+        nick = user.split('!')[0] if '!' in user else user
         ident = user.split('!')[1].split('@')[0] if '!' in user and '@' in user else ''
         host = user.split('@')[1] if '@' in user else ''
+
+        # seen
         seen.on_join(self.sql, self.botId, channel, user, ident, host)
 
-    def userLeft(self, user, channel):
+        # Cere WHO pentru realname / refresh cache
+        try:
+            self.sendLine(f"WHO {nick}")
+        except Exception:
+            pass
 
+        # Dacă nu avem managerul de banuri, ne oprim aici
+        if not hasattr(self, 'ban_expiration_manager'):
+            return
+
+        # ➜ 1) Băgăm ÎNTOTDEAUNA userul în pending (indiferent dacă avem +o sau nu)
+        try:
+            self._queue_pending_ban_check(
+                channel,
+                nick,
+                ident or "*",
+                host or "*",
+                None,  # realname va fi completat (dacă e cazul) din WHO
+            )
+            logger.info(f"[DEBUG] Queued {nick} for pending ban-check on {channel}")
+        except Exception as e:
+            logger.error(f"[DEBUG] FAILED to queue pending ban-check for {nick} on {channel}: {e}")
+            return
+
+        # ➜ 2) Dacă avem deja +o pe canal, procesăm coada ACUM
+        try:
+            if self._has_channel_op(channel):
+                logger.info(f"[DEBUG] Bot HAS +o on {channel}, processing pending bans...")
+                self._process_pending_ban_checks_for_channel(channel)
+            else:
+                logger.info(f"[DEBUG] Bot NO +o on {channel}, will process pending when we get op.")
+        except Exception as e:
+            logger.error(f"[DEBUG] Error while processing pending bans for {channel}: {e}")
+
+    def userLeft(self, user, channel):
         nick = user.split('!')[0]
         ident, host = self._get_ident_host_from_channel(channel, nick)
         seen.on_part(self.sql, self.botId, channel, nick, ident=ident, host=host, reason="left")
         self._remove_user_from_channel(channel, nick)
+        self._remove_from_pending(nick, channel)
 
     def userKicked(self, kicked, channel, kicker, message):
 
         ident, host = self._get_ident_host_from_channel(channel, kicked)
         seen.on_kick(self.sql, self.botId, channel, kicked, kicker, message, ident=ident, host=host)
         self._remove_user_from_channel(channel, kicked)
+        self._remove_from_pending(kicked, channel)
 
     def kickedFrom(self, channel, kicker, message):
 
@@ -632,6 +765,23 @@ class Bot(irc.IRCClient):
             'reason': reason
         }
 
+    def _remove_from_pending(self, nick, channel=None):
+        nick_l = nick.lower()
+
+        if channel:
+            ch = self.pending_ban_checks.get(channel)
+            if ch and nick_l in ch:
+                del ch[nick_l]
+                if not ch:
+                    self.pending_ban_checks.pop(channel, None)
+            return
+
+        for chan, users in list(self.pending_ban_checks.items()):
+            if nick_l in users:
+                del users[nick_l]
+            if not users:
+                self.pending_ban_checks.pop(chan, None)
+
     def _join_channels(self):
         if self.newbot[0] == 0:
             for channel in s.channels:
@@ -674,6 +824,54 @@ class Bot(irc.IRCClient):
                 self.thread_ignore_cleanup = ThreadWorker(target=self.cleanup_ignores, name="ignore_cleanup")
                 self.thread_ignore_cleanup.start()
                 self.ignore_cleanup_started = True
+
+    def who_sync_nick(self, nick: str, timeout: float = 5.0):
+        """
+        Perform a synchronous WHO <nick> and return:
+        {
+          'nick': ...,
+          'ident': ...,
+          'host': ...,
+          'realname': ...
+        }
+        or None on failure.
+
+        IMPORTANT:
+        - Această funcție BLOCHEAZĂ (folosește time.sleep),
+          deci NU trebuie apelată din thread-ul reactorului.
+        - Folosește self.irc_sendline(...) ca să trimită WHO în mod thread-safe.
+        """
+
+        nick_l = nick.lower()
+
+        # Lock WHO system
+        try:
+            self.who_lock.acquire()
+        except Exception:
+            return None
+
+        try:
+            # clear old WHO replies
+            self.who_replies.pop(nick_l, None)
+
+            # register waiter
+            self.who_queue[nick_l] = True
+
+            # send WHO command in a thread-safe way (pe reactor)
+            self.sendLine(f"WHO {nick}")
+
+            # wait for reply filled by irc_RPL_WHOREPLY
+            t0 = time.time()
+            while time.time() - t0 < timeout:
+                if nick_l in self.who_replies:
+                    return self.who_replies.pop(nick_l, None)
+                time.sleep(0.05)
+
+            return None  # timeout
+        finally:
+            # cleanup
+            self.who_queue.pop(nick_l, None)
+            self.who_lock.release()
 
     def whois_sync(self, nick, timeout=5):
         """
@@ -792,21 +990,65 @@ class Bot(irc.IRCClient):
             self.thread_check_logged_users_started = False
 
     def clean_logged_users(self, silent=False):
+        """
+        Curăță logged_in_users pe baza hosturilor VĂZUTE pe canale,
+        dar respectând autoDeauthTime (în ore, din config).
+        Nu mai deloghează instant dacă WHO întârzie sau dacă userul e doar temporar nevăzut.
+        """
+        try:
+            auto_hours = getattr(s, "autoDeauthTime", 1)
+            try:
+                auto_hours = float(auto_hours)
+            except Exception:
+                auto_hours = 1.0
+            # timp maxim de absență permis (în secunde)
+            max_absent = max(60.0, auto_hours * 3600.0)
+        except Exception:
+            max_absent = 3600.0  # fallback 1 oră
+
+        now = time.time()
+
+        # 1) Construim set cu toate host-urile ONLINE (normalizate la fel ca la auth)
+        online_hosts = set()
+        for row in list(self.channel_details):
+            if not isinstance(row, (list, tuple)) or len(row) < 4:
+                continue
+            chan, nick, ident, host = row[:4]
+            raw = f"{ident}@{host}"
+            lhost = self.get_hostname(nick, raw, 0)
+            online_hosts.add(lhost)
+
         to_remove = []
-        for userId, data in self.logged_in_users.items():
-            hosts = data["hosts"]
-            updated_hosts = [h for h in hosts if
-                             any(h in self.get_hostname(u[1], f"{u[2]}@{u[3]}", 0) for u in self.channel_details)]
-            if not updated_hosts:
-                to_remove.append(userId)
+
+        # 2) Verificăm fiecare user logat
+        for userId, data in list(self.logged_in_users.items()):
+            hosts = list(data.get("hosts", []))
+            last_seen = data.setdefault("last_seen", {})
+            keep_hosts = []
+
+            for h in hosts:
+                if h in online_hosts:
+                    # hostul este vizibil acum pe un canal -> marcat ca „văzut acum”
+                    last_seen[h] = now
+                    keep_hosts.append(h)
+                else:
+                    # nu e vizibil acum -> vedem de când nu l-am mai văzut
+                    last_ts = last_seen.get(h, now)
+                    if now - last_ts < max_absent:
+                        # încă în perioada de grație -> păstrăm host-ul
+                        keep_hosts.append(h)
+
+            if keep_hosts:
+                data["hosts"] = keep_hosts
+                data["last_seen"] = last_seen
             else:
-                self.logged_in_users[userId] = {
-                    **data,
-                    "hosts": updated_hosts
-                }
+                to_remove.append(userId)
+
+        # 3) Delogăm userii la care toate hosturile au expirat
         for userId in to_remove:
-            del self.logged_in_users[userId]
-            logger.info(f"🔒 Auto-logout (netsplit or left): userId={userId}")
+            self.logged_in_users.pop(userId, None)
+            if not silent:
+                logger.info(f"🔒 Auto-logout (netsplit or left): userId={userId}")
 
     def logoutOnQuit(self, user):
         nick = user
@@ -853,10 +1095,23 @@ class Bot(irc.IRCClient):
         }
 
         for i, mode_char in enumerate(modes):
-            if mode_char in mode_map and i < len(args):
-                nick = args[i]
+            if i >= len(args):
+                break
+
+            nick = args[i]
+
+            if mode_char in mode_map:
                 privilege_char = mode_map[mode_char]
                 self.user_update_status(channel, nick, privilege_char, set)
+
+            if mode_char == 'o' and nick.lower() == self.nickname.lower():
+                if hasattr(self, "_on_self_op_mode"):
+                    try:
+                        self._on_self_op_mode(channel, set)
+                    except Exception as e:
+                        if hasattr(self, "logger"):
+                            self.logger.error(f"modeChanged/_on_self_op_mode error on {channel}: {e}")
+
 
     def irc_ERR_BANNEDFROMCHAN(self, prefix, params):
         logger.info(f"Error: Banned from channel {params[1]}")
@@ -931,67 +1186,131 @@ class Bot(irc.IRCClient):
                 except Exception as e:
                     self.send_message(nick, f"⚠️ Bad DCC offer: {e}")
                     return
+
         if command == "RPL_WHOREPLY":
-            wchannel = params[1]
-            wident = params[2]
-            whost = params[3]
-            wnickname = params[5]
-            wstatus = params[6]
-            wrealname = params[7]
-            host = f"{wnickname}!{wident}@{whost}"
-            lhost = self.get_hostname(wnickname, f"{wident}@{whost}", 0)
-
-            # 1) remember which nicks we've seen from this logical host
-            self.host_to_nicks[lhost].add(wnickname)
-
-            # 2) if someone is already logged on this host, attach the nick
-            existing_uid = self.get_logged_in_user_by_host(lhost)
-            if existing_uid:
-                self.logged_in_users[existing_uid].setdefault("nicks", set()).add(wnickname)
-
-            privilege_chars = {'@', '+', '%', '&', '~'}
-            privileges = ''.join(sorted(c for c in wstatus if c in privilege_chars))
-
-            key = (wnickname, whost)  # cache key: (nick, host-only)
-            userId = self.user_cache.get_valid(key)
-            if userId is None:
-                info = self.sql.sqlite_handle(self.botId, wnickname, host)  # host = nick!ident@host
-                userId = info[0] if info else None
-                self.user_cache.set(key, userId)
-
-            if (wchannel, wnickname) not in self.known_users:
-                self.channel_details.append([
-                    wchannel, wnickname, wident, whost, privileges, wrealname, userId
-                ])
-                self.known_users.add((wchannel, wnickname))
-
-            if wnickname == s.nickname:
-                return
-
-            if userId and not self.is_logged_in(userId, lhost):
-                stored_hash = self.sql.sqlite_get_user_password(userId)
-                if not stored_hash:
-                    return
-                autologin_setting = self.sql.sqlite_get_user_setting(self.botId, userId, 'autologin')
-                if autologin_setting is not None and autologin_setting == "0":
+            try:
+                if len(params) < 8:
                     return
 
-                if userId not in self.logged_in_users:
-                    self.logged_in_users[userId] = {"hosts": [], "nick": wnickname, "nicks": set()}
+                wchannel = params[1]
+                wident = params[2]
+                whost = params[3]
+                wnickname = params[5]
+                wstatus = params[6]
+                wrealname = params[7]
 
-                if lhost not in self.logged_in_users[userId]["hosts"]:
-                    self.logged_in_users[userId]["hosts"].append(lhost)
+                host = f"{wnickname}!{wident}@{whost}"
+                lhost = self.get_hostname(wnickname, f"{wident}@{whost}", 0)
 
-                nicks_on_host = self.host_to_nicks.get(lhost, set()) or {wnickname}
-                self.logged_in_users[userId]["nicks"].update(nicks_on_host)
-                self.logged_in_users[userId]["nick"] = wnickname
+                # 1) remember which nicks we've seen from this logical host
+                self.host_to_nicks[lhost].add(wnickname)
 
-                # ✅ pornește workerul logged_users cu policy (are beat)
-                self._start_worker("logged_users", target=self._check_logged_users_loop, global_singleton=True)
+                # 2) if someone is already logged on this host, attach the nick
+                existing_uid = self.get_logged_in_user_by_host(lhost)
+                if existing_uid:
+                    self.logged_in_users[existing_uid].setdefault("nicks", set()).add(wnickname)
 
-            else:
-                if userId and self.is_logged_in(userId, lhost):
-                    self.logged_in_users[userId].setdefault("nicks", set()).add(wnickname)
+                privilege_chars = {'@', '+', '%', '&', '~'}
+                privileges = ''.join(sorted(c for c in wstatus if c in privilege_chars))
+
+                key = (wnickname, whost)  # cache key: (nick, host-only)
+                userId = self.user_cache.get_valid(key)
+                if userId is None:
+                    info = self.sql.sqlite_handle(self.botId, wnickname, host)  # host = nick!ident@host
+                    userId = info[0] if info else None
+                    self.user_cache.set(key, userId)
+
+                if (wchannel, wnickname) not in self.known_users:
+                    self.channel_details.append([
+                        wchannel, wnickname, wident, whost, privileges, wrealname, userId
+                    ])
+                    self.known_users.add((wchannel, wnickname))
+
+                if wnickname == self.nickname:
+                    return
+
+                if userId and not self.is_logged_in(userId, lhost):
+                    stored_hash = self.sql.sqlite_get_user_password(userId)
+                    if not stored_hash:
+                        return
+                    autologin_setting = self.sql.sqlite_get_user_setting(self.botId, userId, 'autologin')
+                    if autologin_setting is not None and autologin_setting == "0":
+                        return
+
+                    if userId not in self.logged_in_users:
+                        self.logged_in_users[userId] = {"hosts": [], "nick": wnickname, "nicks": set()}
+
+                    if lhost not in self.logged_in_users[userId]["hosts"]:
+                        self.logged_in_users[userId]["hosts"].append(lhost)
+
+                    nicks_on_host = self.host_to_nicks.get(lhost, set()) or {wnickname}
+                    self.logged_in_users[userId]["nicks"].update(nicks_on_host)
+                    self.logged_in_users[userId]["nick"] = wnickname
+
+                    # ✅ pornește workerul logged_users cu policy (are beat)
+                    self._start_worker("logged_users", target=self._check_logged_users_loop, global_singleton=True)
+
+                else:
+                    if userId and self.is_logged_in(userId, lhost):
+                        self.logged_in_users[userId].setdefault("nicks", set()).add(wnickname)
+
+                # 3) Integrare cu who_sync_nick: dacă cineva așteaptă WHO pentru nick-ul ăsta,
+                #    salvează datele și în self.who_replies ca să deblocheze who_sync_nick().
+                try:
+                    nick_l = (wnickname or "").lower()
+                    if hasattr(self, "who_queue") and hasattr(self, "who_replies"):
+                        if nick_l in self.who_queue:
+                            self.who_replies[nick_l] = {
+                                "nick": wnickname,
+                                "ident": wident,
+                                "host": whost,
+                                "realname": wrealname,
+                                "channel": wchannel,
+                                "status": wstatus,
+                            }
+                except Exception:
+                    # nu vrem să stricăm fluxul principal dacă WHO-sync cache pică
+                    pass
+
+                # 4) Integrare cu pending_ban_checks:
+                #    - completăm ident/host/realname din WHO
+                #    - dacă avem deja +o pe canal, verificăm acum banurile pentru userul ăsta
+                if hasattr(self, 'ban_expiration_manager') and hasattr(self, 'pending_ban_checks'):
+                    pending_users = self.pending_ban_checks.get(wchannel, {})
+                    if pending_users:
+                        nick_l = (wnickname or "").lower()
+                        data = pending_users.get(nick_l)
+                        if data:
+                            # actualizează datele din WHO
+                            data["ident"] = wident or data.get("ident") or "*"
+                            data["host"] = whost or data.get("host") or "*"
+                            if wrealname:
+                                data["realname"] = wrealname
+
+                            has_op = False
+                            try:
+                                has_op = self._has_channel_op(wchannel)
+                            except Exception:
+                                has_op = False
+
+                            if has_op:
+                                try:
+                                    self.ban_expiration_manager.check_user_against_bans(
+                                        wchannel,
+                                        data.get("nick") or wnickname,
+                                        data.get("ident") or "*",
+                                        data.get("host") or "*",
+                                        data.get("realname") or None,
+                                    )
+                                    pending_users.pop(nick_l, None)
+                                    logger.info(f"🔄 Re-checked ban for {wnickname} after WHO completion")
+                                except Exception as e:
+                                    if hasattr(self, 'logger'):
+                                        self.logger.error(f"Re-check ban failed for {wnickname}: {e}")
+
+            except Exception as e:
+                if hasattr(self, "logger"):
+                    self.logger.error(f"irc_unknown/RPL_WHOREPLY error: {e}", exc_info=True)
 
     def irc_ERR_NICKNAMEINUSE(self, prefix, params):
         if self.nick_already_in_use == 1 and self.recover_nick_timer_start is False:
@@ -1437,7 +1756,7 @@ class Bot(irc.IRCClient):
             if host_type > 0 and host_type in formats:
                 return formats[host_type]
             else:
-                default_type = getattr(s, "default_hostname", 2)
+                default_type = getattr(s, "default_hostname", 1)
                 return formats.get(default_type, f"*!{ident}@{host_only}")
 
         except Exception:
@@ -1529,7 +1848,8 @@ class Bot(irc.IRCClient):
                 'core.log',
                 'core.nettools',
                 'core.monitor_client',
-                'core.optimized_cache'
+                'core.optimized_cache',
+                'core.ban_expiration_manager'
             ]
             for mod_name in modules_to_reload:
                 if mod_name in sys.modules:
@@ -1603,6 +1923,202 @@ class Bot(irc.IRCClient):
                 logger.error(f"⚠️ Auto-update thread error: {e}")
             time.sleep(s.autoUpdateInterval * 60)
 
+    def _has_channel_op(self, channel: str) -> bool:
+        try:
+            mynick = self.nickname.lower()
+            for row in self.channel_details:
+                # [channel, nick, ident, host, priv, realname, userId]
+                if not isinstance(row, (list, tuple)) or len(row) < 5:
+                    continue
+                if str(row[0]).lower() != channel.lower():
+                    continue
+                if str(row[1]).lower() != mynick:
+                    continue
+                priv = str(row[4] or "")
+                # @, ~, & etc – tratează ca „am op sau mai mult”
+                if any(p in priv for p in ("@", "~", "&", "q", "a")):
+                    return True
+        except Exception:
+            pass
+
+        return bool(self.channel_op_state.get(channel, False))
+
+    def _prune_pending_ban_checks(self):
+        now = time.time()
+        total = 0
+        for chan, users in list(self.pending_ban_checks.items()):
+            for nick_l, data in list(users.items()):
+                if now - data.get("ts", now) > self.pending_ban_max_age:
+                    del users[nick_l]
+            if not users:
+                self.pending_ban_checks.pop(chan, None)
+            else:
+                total += len(users)
+
+        # dacă tot e peste limita globală, tăiem din cei mai vechi
+        if total > self.pending_ban_global_max:
+            # construim o listă (chan, nick_l, ts) și o sortăm
+            entries = []
+            for chan, users in self.pending_ban_checks.items():
+                for nick_l, data in users.items():
+                    entries.append((chan, nick_l, data.get("ts", 0)))
+            entries.sort(key=lambda x: x[2])  # cei mai vechi primii
+
+            to_remove = total - self.pending_ban_global_max
+            for chan, nick_l, _ in entries[:to_remove]:
+                ch_dict = self.pending_ban_checks.get(chan, {})
+                if nick_l in ch_dict:
+                    del ch_dict[nick_l]
+                if not ch_dict:
+                    self.pending_ban_checks.pop(chan, None)
+
+    def _queue_pending_ban_check(self, channel: str, nick: str,
+                                 ident: str | None, host: str | None,
+                                 realname: str | None):
+        channel = channel or ""
+        if not channel.startswith("#"):
+            return
+
+        now = time.time()
+        self._prune_pending_ban_checks()
+
+        chan_dict = self.pending_ban_checks.setdefault(channel, {})
+        if len(chan_dict) >= self.pending_ban_max_per_channel:
+            # dacă canalul e plin, ștergem cel mai vechi din el
+            oldest_nick = None
+            oldest_ts = now
+            for n_l, data in chan_dict.items():
+                ts = data.get("ts", now)
+                if ts <= oldest_ts:
+                    oldest_ts = ts
+                    oldest_nick = n_l
+            if oldest_nick is not None:
+                chan_dict.pop(oldest_nick, None)
+
+        nick_l = nick.lower()
+        chan_dict[nick_l] = {
+            "nick": nick,
+            "ident": ident or "*",
+            "host": host or "*",
+            "realname": realname or "",
+            "ts": now,
+        }
+
+    def _process_pending_ban_checks_for_channel(self, channel: str, max_per_batch: int = 50):
+        if not hasattr(self, "ban_expiration_manager"):
+            return
+
+        chan_dict = self.pending_ban_checks.get(channel)
+        if not chan_dict:
+            return
+
+        now = time.time()
+        to_delete = []
+        count = 0
+
+        # sortăm după ts ca să luăm pe cei mai vechi întâi
+        for nick_l, data in sorted(chan_dict.items(), key=lambda kv: kv[1].get("ts", 0)):
+            if now - data.get("ts", now) > self.pending_ban_max_age:
+                to_delete.append(nick_l)
+                continue
+            if count >= max_per_batch:
+                break
+
+            nick = data["nick"]
+            ident = data.get("ident") or "*"
+            host = data.get("host") or "*"
+            realname = data.get("realname") or None
+
+            try:
+                self.ban_expiration_manager.check_user_against_bans(
+                    channel, nick, ident, host, realname
+                )
+            except Exception as e:
+                self.logger.error(f"pending ban check failed for {nick} on {channel}: {e}")
+
+            to_delete.append(nick_l)
+            count += 1
+
+        for nick_l in to_delete:
+            chan_dict.pop(nick_l, None)
+
+        if not chan_dict:
+            self.pending_ban_checks.pop(channel, None)
+
+    def _on_self_op_mode(self, channel: str, is_set: bool):
+        """
+        Apelată când botul primește sau pierde +o pe un canal.
+        Dacă tocmai a primit +o → procesează coză de useri strânși cât timp n-a avut op.
+        """
+        channel = channel or ""
+        if not channel.startswith("#"):
+            return
+
+        self.channel_op_state[channel] = bool(is_set)
+
+        if is_set:
+            # tocmai am luat op → verifică userii „în așteptare”
+            self._process_pending_ban_checks_for_channel(channel)
+
+    def irc_MODE(self, prefix, params):
+        """
+        Handle MODE messages to track when the bot gains or loses +o on channels.
+        Example raw:
+          :Nick!user@host MODE #chan +o BlackBoT
+        """
+        try:
+            if len(params) < 2:
+                return
+
+            target = params[0]
+            modes = params[1]
+            args = list(params[2:])
+
+            # Ne interesează doar mode-urile pe canale
+            if not target.startswith("#"):
+                return
+
+            channel = target
+            adding = True
+            arg_i = 0
+
+            mynick_l = (self.nickname or "").lower()
+
+            for ch in modes:
+                if ch == "+":
+                    adding = True
+                    continue
+                if ch == "-":
+                    adding = False
+                    continue
+
+                # mode-uri cu argument (o, h, v, q, a etc.)
+                if ch in ("o", "h", "v", "q", "a"):
+                    if arg_i >= len(args):
+                        break
+                    nick = args[arg_i]
+                    arg_i += 1
+
+                    if nick.lower() == mynick_l and ch == "o":
+                        # Noi am primit sau pierdut op
+                        try:
+                            self._on_self_op_mode(channel, adding)
+                        except Exception:
+                            pass
+
+                        if adding:
+                            logger.info(f"[mode] I GOT +o on {channel}")
+                        else:
+                            logger.info(f"[mode] I LOST +o on {channel}")
+
+                else:
+                    # mod fără argument (b, i, m etc.) -> ignorăm aici
+                    continue
+
+        except Exception as e:
+            if hasattr(self, "logger"):
+                self.logger.error(f"irc_MODE error: {e}", exc_info=True)
+
 
 class BotFactory(protocol.ReconnectingClientFactory):
     def __init__(self, nickname, realname):
@@ -1631,8 +2147,11 @@ class BotFactory(protocol.ReconnectingClientFactory):
 
     def rotate_and_connect(self):
         host, port, vhost = server_next_round_robin()
-        logger.info(f"🔁 Reconnecting to {host}:{port} (vhost={vhost}) ...")
-        self.connect_to(host, port, vhost)
+        delay = getattr(s, "reconnectDelaySeconds", 10)
+        logger.info(
+            f"🔁 Reconnecting to {host}:{port} (vhost={vhost}) in {delay}s ..."
+        )
+        reactor.callLater(delay, self.connect_to, host, port, vhost)
 
 
     def connect_to(self, host, port, vhost):
@@ -1656,8 +2175,6 @@ class BotFactory(protocol.ReconnectingClientFactory):
                 reactor.connectTCP(host, int(port), self, bindAddress=bind_addr)
             else:
                 reactor.connectTCP(host, int(port), self)
-
-
 
     def clientConnectionLost(self, connector, reason):
         logger.info(f"Connection lost: {reason}. Rotating server & reconnecting...")

@@ -127,7 +127,7 @@ class EnvironmentConfig:
             'log_file': 'blackbot.log',
             'log_max_lines': 100000,
             'log_backup_count': 3,
-            'log_level': 'INFO',
+            'log_level': 'DEBUG',
             # Monitor credentials
             'monitor_cred_file': 'data/cred.json',
         }

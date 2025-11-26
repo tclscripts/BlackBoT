@@ -115,20 +115,110 @@ class SQL:
             except Exception:
                 expires = None
 
+        # 1) Vedem dacă există deja un ban cu aceeași mască în același scope
         if channel:
-            sql = ("INSERT INTO BANS_LOCAL "
-                   "(botId, channel, setter_userId, setter_nick, ban_mask, ban_type, sticky, reason, created_at, duration_seconds, expires_at) "
-                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-            params = (botId, channel, setter_userId, setter_nick, ban_mask, ban_type,
-                      1 if sticky else 0, reason, created, duration_seconds, expires)
+            select_sql = (
+                "SELECT id FROM BANS_LOCAL "
+                "WHERE botId = ? AND channel = ? AND ban_mask = ? AND ban_type = ? "
+                "LIMIT 1"
+            )
+            select_params = (botId, channel, ban_mask, ban_type)
         else:
-            sql = ("INSERT INTO BANS_GLOBAL "
-                   "(botId, setter_userId, setter_nick, ban_mask, ban_type, sticky, reason, created_at, duration_seconds, expires_at) "
-                   "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-            params = (botId, setter_userId, setter_nick, ban_mask, ban_type,
-                      1 if sticky else 0, reason, created, duration_seconds, expires)
+            select_sql = (
+                "SELECT id FROM BANS_GLOBAL "
+                "WHERE botId = ? AND ban_mask = ? AND ban_type = ? "
+                "LIMIT 1"
+            )
+            select_params = (botId, ban_mask, ban_type)
 
-        return self.sqlite3_insert(sql, params)
+        existing = self.sqlite_select(select_sql, select_params)
+
+        # 2) Dacă există → UPDATE (înlocuim banul)
+        if existing:
+            ban_id = existing[0][0]
+
+            if channel:
+                update_sql = (
+                    "UPDATE BANS_LOCAL "
+                    "SET setter_userId = ?, setter_nick = ?, sticky = ?, reason = ?, "
+                    "    created_at = ?, duration_seconds = ?, expires_at = ?, "
+                    "    last_action_at = NULL, times_applied = 0 "
+                    "WHERE id = ?"
+                )
+                update_params = (
+                    setter_userId,
+                    setter_nick,
+                    1 if sticky else 0,
+                    reason,
+                    created,
+                    duration_seconds,
+                    expires,
+                    ban_id,
+                )
+            else:
+                update_sql = (
+                    "UPDATE BANS_GLOBAL "
+                    "SET setter_userId = ?, setter_nick = ?, sticky = ?, reason = ?, "
+                    "    created_at = ?, duration_seconds = ?, expires_at = ?, "
+                    "    last_action_at = NULL, times_applied = 0 "
+                    "WHERE id = ?"
+                )
+                update_params = (
+                    setter_userId,
+                    setter_nick,
+                    1 if sticky else 0,
+                    reason,
+                    created,
+                    duration_seconds,
+                    expires,
+                    ban_id,
+                )
+
+            self.sqlite3_update(update_sql, update_params)
+            return ban_id  # întoarcem ID-ul existent (actualizat)
+
+        # 3) Dacă NU există → INSERT normal
+        if channel:
+            insert_sql = (
+                "INSERT INTO BANS_LOCAL "
+                "(botId, channel, setter_userId, setter_nick, ban_mask, ban_type, sticky, "
+                " reason, created_at, duration_seconds, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            insert_params = (
+                botId,
+                channel,
+                setter_userId,
+                setter_nick,
+                ban_mask,
+                ban_type,
+                1 if sticky else 0,
+                reason,
+                created,
+                duration_seconds,
+                expires,
+            )
+        else:
+            insert_sql = (
+                "INSERT INTO BANS_GLOBAL "
+                "(botId, setter_userId, setter_nick, ban_mask, ban_type, sticky, "
+                " reason, created_at, duration_seconds, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            insert_params = (
+                botId,
+                setter_userId,
+                setter_nick,
+                ban_mask,
+                ban_type,
+                1 if sticky else 0,
+                reason,
+                created,
+                duration_seconds,
+                expires,
+            )
+
+        return self.sqlite3_insert(insert_sql, insert_params)
 
     def sqlite_remove_ban_by_id(self, ban_id, local=True):
         if local:

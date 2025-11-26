@@ -197,5 +197,21 @@ command_definitions = [
     'description': f'ASN info. Basic: {config.char}asn AS32934  | Full: {config.char}asn AS32934 full',
     'flags': '-',  # public
     'id': '39'
+},
+{
+    'name': 'unban',
+    'description': 'Remove a ban by mask, by nick (resolved via WHO/WHOIS), or by ID.\n'
+                   'Usage:\n'
+                   '  !unban <mask|nick|id:NUMBER>\n'
+                   'Examples:\n'
+                   '  !unban *!*@bad.host\n'
+                   '  !unban badguy             → resolves host and removes matching bans\n'
+                   '  !unban id:40              → removes a specific ban by ID\n'
+                   'Notes:\n'
+                   '- If a nick is provided, the bot attempts WHO lookups to resolve ident@host.\n'
+                   '- Matches both local and global bans.\n'
+                   '- Removing by ID always removes exactly one ban.',
+    'flags': 'NnmMAO',
+    'id': '40'
 }
 ]
