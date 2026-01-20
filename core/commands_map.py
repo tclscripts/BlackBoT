@@ -213,5 +213,32 @@ command_definitions = [
                    '- Removing by ID always removes exactly one ban.',
     'flags': 'NnmMAO',
     'id': '40'
+},
+{
+    'name': 'user',
+    'description': (
+        'User Analytics - Behavioral insights and statistics.\n'
+        'Usage: !user <subcommand> <args>\n'
+        '\n'
+        'Subcommands:\n'
+        '  profile <nick> [days]    - Complete user behavioral profile\n'
+        '  sentiment <nick> [days]  - Sentiment analysis (positive/negative/neutral)\n'
+        '  partners <nick> [days]   - Top conversation partners\n'
+        '  active <nick> [days]     - Peak activity times (hours/days)\n'
+        '  compare <nick1> <nick2> [days] - Compare two users side-by-side\n'
+        '  link <nick>              - Get link to web analytics dashboard\n'
+        '\n'
+        'Examples:\n'
+        '  !user profile alice 30   - Alice\'s profile for last 30 days\n'
+        '  !user sentiment bob      - Bob\'s sentiment analysis\n'
+        '  !user partners charlie   - Who Charlie talks to most\n'
+        '  !user active alice       - Alice\'s peak hours/days\n'
+        '  !user compare alice bob  - Compare Alice and Bob\n'
+        '  !user link alice         - Get web dashboard link\n'
+        '\n'
+        'Default period: 30 days'
+    ),
+    'flags': '-',  # Public command (anyone can use)
+    'id': '41'  # Adjust ID based on last ID in your commands_map.py
 }
 ]

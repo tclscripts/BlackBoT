@@ -1,3 +1,4 @@
+# core/dcc.py
 from __future__ import annotations
 from typing import Optional, Dict, Tuple, List
 from dataclasses import dataclass, field
@@ -7,19 +8,22 @@ from twisted.protocols.basic import LineReceiver
 
 from core.threading_utils import get_event
 from core.threading_utils import ThreadWorker
-from core.log import get_logger
+from core import log
 from core.environment_config import config
 
-logger = get_logger("dcc")
+logger = log.get_logger("dcc")
 
 DEFAULT_IDLE = 600  # seconds
-CHANNEL_REQUIRED = {"op","deop","voice","devoice","hop","hdeop","say","cycle","add","delacc","userlist"}
+CHANNEL_REQUIRED = {"op", "deop", "voice", "devoice", "hop", "hdeop", "say", "cycle", "add", "delacc", "userlist"}
+
 
 def ip_to_int(ip: str) -> int:
     return int(ipaddress.IPv4Address(ip))
 
+
 def int_to_ip(n: int) -> str:
     return str(ipaddress.IPv4Address(n))
+
 
 @dataclass
 class DCCSession:
@@ -27,8 +31,8 @@ class DCCSession:
     transport: Optional[protocol.Protocol] = None
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
-    outbound_offer: bool = False   # True dacă noi am pornit listener-ul și așteptăm inbound
-    listening_port: Optional[object] = None  # IPort de la reactor.listenTCP (pentru port efemer)
+    outbound_offer: bool = False
+    listening_port: Optional[object] = None
     meta: Dict[str, str] = field(default_factory=dict)
 
     def age(self) -> int:
@@ -36,6 +40,7 @@ class DCCSession:
 
     def touch(self) -> None:
         self.last_activity = time.time()
+
 
 class DCCChatProtocol(LineReceiver):
     delimiter = b"\n"
@@ -46,9 +51,7 @@ class DCCChatProtocol(LineReceiver):
 
     def connectionMade(self):
         self.manager.on_connected(self.peer_nick, self)
-
         try:
-            # Trimite handshake doar bot↔bot
             if self.manager._is_botlink_user(self.peer_nick):
                 self.send_text(f"\x02BL:HELLO {self.manager.bot.nickname}\x02")
         except Exception:
@@ -62,6 +65,7 @@ class DCCChatProtocol(LineReceiver):
         self.manager.on_line(self.peer_nick, text)
 
     def connectionLost(self, reason):
+        # Notificăm managerul doar dacă conexiunea s-a pierdut real (socket closed)
         self.manager.on_disconnected(self.peer_nick)
 
     def send_text(self, text: str):
@@ -69,6 +73,7 @@ class DCCChatProtocol(LineReceiver):
             self.sendLine(text.encode("utf-8"))
         except Exception as e:
             logger.warning(f"[proto] send_text error peer={self.peer_nick!r} err={e}")
+
 
 class DCCChatFactory(protocol.ClientFactory):
     def __init__(self, manager: "DCCManager", peer_nick: str):
@@ -81,6 +86,7 @@ class DCCChatFactory(protocol.ClientFactory):
     def clientConnectionFailed(self, connector, reason):
         self.manager.on_failed(self.peer_nick, f"connect failed: {reason}")
 
+
 class DCCListenFactory(protocol.Factory):
     def __init__(self, manager: "DCCManager", peer_nick: str | None = None):
         self.manager = manager
@@ -90,17 +96,43 @@ class DCCListenFactory(protocol.Factory):
         nick = self.peer_nick or self.manager._claim_pending_offer() or "?"
         return DCCChatProtocol(self.manager, nick)
 
+
 class DCCManager:
+    """
+    Singleton Manager care rezistă la restartul instanței BlackBoT.
+    Permite păstrarea conexiunilor DCC active în timpul unui !jump.
+    """
+    _instance = None
     _registry_lock = threading.RLock()
     _registry: "set[DCCManager]" = set()
     _global_worker_name = "botlink"
     _global_backoff_default = 5
     _global_last_run: float = 0.0
 
+    # Flag pentru a verifica dacă singleton-ul a fost inițializat complet
+    _initialized = False
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(DCCManager, cls).__new__(cls)
+        return cls._instance
+
     def __init__(self, bot, *, public_ip: Optional[str] = None, fixed_port: Optional[int] = None,
                  port_range: Tuple[int, int] = (50000, 52000), idle_timeout: int = DEFAULT_IDLE,
                  allow_unauthed: bool = False):
+
+        # Actualizăm referința la bot la fiecare re-init (pentru !jump)
         self.bot = bot
+
+        # Dacă managerul e deja activ, NU resetăm sesiunile, doar actualizăm IP/Config
+        if self._initialized:
+            logger.info(f"ℹ️ [DCC] Sessions preserved for new bot instance: {bot.nickname}")
+            if public_ip: self.public_ip = public_ip
+            return
+
+        # ─────────────────────────────────────────────────────────────────
+        # Inițializare (o singură dată la pornirea procesului)
+        # ─────────────────────────────────────────────────────────────────
         self.sessions: Dict[str, DCCSession] = {}
         self.public_ip = public_ip or self._best_local_v4()
         self.fixed_port = fixed_port
@@ -109,19 +141,15 @@ class DCCManager:
         self.idle_timeout = idle_timeout
         self.allow_unauthed = allow_unauthed
 
-        # înregistrează instanța în registrul global
         with self._registry_lock:
             self._registry.add(self)
 
-        # containere interne
         self.pending_offers: List[Dict[str, object]] = []
         self.pending_ttl = 120
         self.link_peers: set[str] = set()
 
-        # populăm allowlist-ul din DB
         self._refresh_link_peers_from_db()
 
-        # config pentru refresh periodic
         self._peers_refresh_interval = int(getattr(config, "botlink_refresh_interval", 60))
         self._last_peers_refresh = 0.0
 
@@ -132,16 +160,26 @@ class DCCManager:
         if self.fixed_port:
             self._ensure_fixed_listener()
 
-        # pornește un singur worker global (după ce totul e inițializat)
         try:
             interval = int(getattr(config, "botlink_autoconnect_interval", 30))
         except Exception:
             interval = 30
         self.start_global_botlink_autoconnect(interval=interval)
 
+        self._initialized = True
+
     # ---------- lifecycle ----------
-    def shutdown(self):
-        logger.debug("[shutdown] closing all sessions and listener")
+    def shutdown(self, force: bool = False):
+        """
+        Închide managerul DCC.
+        IMPORTANT: Dacă force=False (default), NU închide conexiunile active.
+        Acest lucru permite ca DCC-ul să supraviețuiască la !jump.
+        """
+        if not force:
+            logger.info("ℹ️ [DCC] Shutdown called but ignored (preserving sessions for jump/reload).")
+            return
+
+        logger.debug("[shutdown] Force closing all sessions and listener")
         with self._registry_lock:
             self._registry.discard(self)
         for nick, sdata in list(self.sessions.items()):
@@ -155,10 +193,11 @@ class DCCManager:
                 logger.warning(f"[shutdown] stopListening error: {e}")
             self.listener_port_obj = None
 
+        self._initialized = False
+
     # ---------- utils ----------
     def _best_local_v4(self) -> str:
         ip = None
-
         try:
             cand = getattr(self.bot, "public_ip", None)
         except Exception:
@@ -186,9 +225,7 @@ class DCCManager:
             sck.close()
         except Exception:
             ip = "127.0.0.1"
-
         return ip
-
 
     def _pick_port(self) -> int:
         return self.fixed_port or random.randint(self.port_min, self.port_max)
@@ -199,7 +236,6 @@ class DCCManager:
         try:
             factory = DCCListenFactory(self)
             self.listener_port_obj = reactor.listenTCP(int(self.fixed_port), factory, interface="0.0.0.0")
-            # IMPORTANT: 0.0.0.0 la bind; IP-ul anunțat rămâne self.public_ip
             self.bot.public_ip = self.public_ip
             logger.debug(f"[listen] fixed port active on 0.0.0.0:{self.fixed_port}")
         except Exception as e:
@@ -207,12 +243,12 @@ class DCCManager:
             self.listener_port_obj = None
             self.fixed_port = None
             try:
+                msg = f"❌ DCC: cannot open fixed port (using ephemeral): {e}"
                 if hasattr(self.bot, "message_queue"):
-                    self.bot.send_message(self.bot.nickname, f"❌ DCC: cannot open fixed port (using ephemeral): {e}")
+                    self.bot.send_message(self.bot.nickname, msg)
                 else:
-                    reactor.callLater(2.0, lambda: hasattr(self.bot, "message_queue") and
-                                                   self.bot.send_message(self.bot.nickname,
-                                                                         f"❌ DCC: cannot open fixed port (using ephemeral): {e}"))
+                    reactor.callLater(2.0, lambda: hasattr(self.bot, "message_queue") and self.bot.send_message(
+                        self.bot.nickname, msg))
             except Exception:
                 pass
 
@@ -260,7 +296,6 @@ class DCCManager:
 
     # ---------- outward offer ----------
     def offer_chat(self, nick: str, *, feedback: str):
-        # dacă peer-ul e botlink și avem deja conexiune deschisă -> nu mai oferim încă una
         if self._is_botlink_user(nick) and self._has_open_session(nick):
             logger.debug(f"[offer] skip, already open with botlink peer {nick!r}")
             try:
@@ -297,11 +332,11 @@ class DCCManager:
         self.sessions[nick.lower()] = sess
         logger.debug(f"[offer] session created for {nick!r} ip={ip} port={port} outbound_offer=True")
 
-        # FIFO pentru fixed port — dedupe
         self._gc_pending_offers()
-        self.pending_offers = [p for p in self.pending_offers if (p.get("nick","").lower()!=nick.lower())]
+        self.pending_offers = [p for p in self.pending_offers if (p.get("nick", "").lower() != nick.lower())]
         self.pending_offers.append({"nick": nick, "ts": time.time()})
-        logger.debug(f"[fifo] appended offer nick={nick!r} size={len(self.pending_offers)} peek={self._peek_pending_offer()!r}")
+        logger.debug(
+            f"[fifo] appended offer nick={nick!r} size={len(self.pending_offers)} peek={self._peek_pending_offer()!r}")
 
         ctcp = f"\x01DCC CHAT chat {ip_int} {port}\x01"
         self.bot.send_message(feedback, f"📨 Sent DCC CHAT offer to {nick} ({ip}:{port})")
@@ -309,7 +344,6 @@ class DCCManager:
 
     # ---------- inbound offer ----------
     def accept_offer(self, nick: str, ip_or_int: str, port: int, *, feedback: str):
-        # conexiune unică pentru boți
         if self._is_botlink_user(nick) and self._has_open_session(nick):
             logger.debug(f"[accept] ignore inbound offer from {nick!r}: already open")
             try:
@@ -324,9 +358,9 @@ class DCCManager:
             host = ip_or_int
 
         real_host = (
-            self._bind_to_authenticated_host(nick)
-            or self._best_seen_host(nick)
-            or host
+                self._bind_to_authenticated_host(nick)
+                or self._best_seen_host(nick)
+                or host
         )
         self.bot.send_message(
             feedback, f"🔗 Connecting to DCC {nick} at {host}:{port} (IRC host: {real_host}) ..."
@@ -351,9 +385,55 @@ class DCCManager:
             },
         )
 
+    def broadcast_log_to_humans(self, log_message: str) -> None:
+        """
+        Broadcast a log message to all human (non-botlink) DCC sessions.
+        Called by the logging system via callback.
+
+        Args:
+            log_message: Formatted log message (already includes timestamp, level, etc.)
+        """
+        # Thread-local flag pentru a preveni infinite loops
+        import threading
+        if not hasattr(self, '_broadcast_lock'):
+            self._broadcast_lock = threading.local()
+
+        # Prevent recursion (dacă send_text generează un log)
+        if getattr(self._broadcast_lock, 'active', False):
+            return
+
+        try:
+            self._broadcast_lock.active = True
+
+            # Trimite la toate sesiunile umane active
+            for nick, session in list(self.sessions.items()):
+                # Skip dacă nu are transport
+                if not session or not session.transport:
+                    continue
+
+                # Skip botlink sessions (nu sunt umani)
+                if session.meta.get('botlink') == '1':
+                    continue
+
+                # Skip dacă explicit disabled
+                if session.meta.get('log_streaming') == '0':
+                    continue
+
+                # Trimite log-ul
+                try:
+                    session.transport.send_text(f"[LOG] {log_message}")
+                except Exception:
+                    # Silent fail - nu vrem să generăm mai multe loguri
+                    pass
+
+        except Exception:
+            # Silent fail total - критical pentru a evita loops
+            pass
+        finally:
+            self._broadcast_lock.active = False
+
     # ---------- protocol callbacks ----------
     def on_connected(self, nick: str, proto: DCCChatProtocol):
-        # map '?' la pending offer dacă e cazul
         if nick == "?":
             claimed = self._claim_pending_offer()
             if claimed:
@@ -381,7 +461,6 @@ class DCCManager:
         sdata.transport = proto
         sdata.touch()
 
-        # NEW: extrage adresa peer-ului și populă meta ip/port dacă lipsesc
         try:
             peer = getattr(proto.transport, "getPeer", lambda: None)()
             ph = getattr(peer, "host", None)
@@ -398,11 +477,23 @@ class DCCManager:
             hm = f"*@" + sdata.meta["ip"]
         sdata.meta["hostmask"] = hm
 
-        # marchează botlink dacă e whitelisted
         if self._is_botlink_user(nick):
             sdata.meta["botlink"] = "1"
 
         self.bot.send_message(nick, "[DCC] connected. You can now type commands or chat.")
+        if sdata.meta.get("botlink") != "1":
+            try:
+                # Enable log streaming by default
+                sdata.meta['log_streaming'] = '1'
+                proto.send_text("ℹ️ Log streaming enabled for this session.")
+
+                # Send buffered logs (last 10 lines)
+                if hasattr(self.bot, 'dcc_log_handler') and self.bot.dcc_log_handler:
+                    sent = self.bot.dcc_log_handler.send_buffered_logs(nick, max_lines=10)
+                    if sent > 0:
+                        proto.send_text(f"[INFO] Sent {sent} buffered log lines")
+            except Exception as e:
+                logger.warning(f"Failed to enable log streaming for {nick}: {e}")
 
     def on_line(self, nick: str, text: str):
         key = nick.lower()
@@ -414,13 +505,11 @@ class DCCManager:
         if not line:
             return
 
-        # --- Handshake botlink: \x02BL:HELLO <Nick>\x02 ---
         if line.startswith("\x02BL:HELLO ") and line.endswith("\x02"):
             announced = line[len("\x02BL:HELLO "):-1].strip()
             if announced:
                 if sess and getattr(sess, "transport", None):
                     try:
-                        # redenumește sesiunea curentă în nick-ul anunțat
                         self._rename_session(nick, announced, sess.transport)
                         nick = announced
                         key = nick.lower()
@@ -428,7 +517,6 @@ class DCCManager:
                     except Exception as e:
                         logger.debug(f"[handshake] rename error for {nick!r} -> {announced!r}: {e}")
 
-                # NEW: completează IP/port după rename, dacă lipsesc
                 if sess and getattr(sess, "transport", None):
                     try:
                         peer = getattr(sess.transport.transport, "getPeer", lambda: None)()
@@ -441,31 +529,30 @@ class DCCManager:
                     except Exception:
                         pass
 
-                # marchează ca botlink dacă e în allowlist
                 if sess and self._is_botlink_user(nick):
                     sess.meta["botlink"] = "1"
+            return
 
-            return  # nu propagăm acest cadru mai departe
-
-        # --- Cadre botlink control ---
         if line.startswith("[BL/MSG]"):
             logger.debug(f"[botlink] ctrl from={nick!r} text={line!r}")
             return
 
-        # --- Ignoră mesajele provenite de la boți (botlink) ---
         if sess and sess.meta.get("botlink") == "1":
             return
 
-        # --- Comenzi ---
         if line.startswith(config.char) or line.lower().startswith(self.bot.nickname.lower()):
             self._dispatch_as_privmsg(nick, line)
             return
 
-        # --- Echo simplu ---
-        print(f"[dcc-chat] {nick}: {line}")
+        # Echo simplu
         self.bot.send_message(nick, f"[DCC←{nick}] {line}")
 
     def on_disconnected(self, nick: str):
+        """
+        Apelat când socketul DCC crapă.
+        Dacă utilizatorul închide fereastra DCC, aceasta se execută.
+        Dacă botul dă !jump, aceasta NU ar trebui să se execute (socketul rămâne viu).
+        """
         key = nick.lower()
         s = self.sessions.pop(key, None)
         if s and s.listening_port and not self.fixed_port:
@@ -473,11 +560,20 @@ class DCCManager:
                 s.listening_port.stopListening()
             except Exception as e:
                 logger.warning(f"[disconnect] stopListening error for {nick!r}: {e}")
-        self.bot.send_message(nick, f"[DCC] disconnected.")
+
+        # Trimitem mesaj doar dacă botul e conectat la IRC
+        if hasattr(self.bot, "send_message"):
+            try:
+                self.bot.send_message(nick, f"[DCC] disconnected.")
+            except:
+                pass
 
     def on_failed(self, nick: str, reason: str):
         logger.error(f"[failed] nick={nick!r} reason={reason}")
-        self.bot.send_message(nick, f"[DCC] connection failed: {reason}")
+        try:
+            self.bot.send_message(nick, f"[DCC] connection failed: {reason}")
+        except:
+            pass
         self._close_session(nick)
 
     # ---------- admin ----------
@@ -541,14 +637,16 @@ class DCCManager:
             hostmask = self._bind_to_authenticated_host(nick) or "*@*"
         user_prefix = f"{nick}!{hostmask}"
         line = self._inject_channel_if_needed((text or "").strip(), nick)
-        self.bot.privmsg(user_prefix, self.bot.nickname, line)
+        # Folosim try/except pentru că botul poate fi între conexiuni la !jump
+        try:
+            self.bot.privmsg(user_prefix, self.bot.nickname, line)
+        except Exception as e:
+            logger.error(f"[DCC] Failed to dispatch command (bot not ready?): {e}")
 
     def _inject_channel_if_needed(self, line: str, nick: str) -> str:
         tokens = line.split()
         if not tokens:
             return line
-
-        # formă: !cmd ...
         if tokens[0].startswith(config.char):
             cmd = tokens[0][1:].lower()
             args = tokens[1:]
@@ -571,7 +669,6 @@ class DCCManager:
                         "Example: !op #channel [nick]. No common channels detected."
                     )
         else:
-            # formă: BotNick cmd ...
             if len(tokens) >= 2 and tokens[0].lower() == self.bot.nickname.lower():
                 cmd = tokens[1].lower()
                 args = tokens[2:]
@@ -618,7 +715,7 @@ class DCCManager:
                     if hosts:
                         raw = str(hosts[0])
                         if "!" in raw:
-                            raw = raw.split("!", 1)[1]  # ident@host
+                            raw = raw.split("!", 1)[1]
                         if "@" not in raw:
                             raw = f"*@" + raw
                         return raw
@@ -631,7 +728,7 @@ class DCCManager:
             for row in getattr(self.bot, "channel_details", []):
                 if row and len(row) >= 4 and (row[1] or "").lower() == nick.lower():
                     ident = row[2] or "*"
-                    host  = row[3] or ""
+                    host = row[3] or ""
                     if host and host != "*":
                         return f"{ident}@{host}"
         except Exception:
@@ -640,7 +737,7 @@ class DCCManager:
             if hasattr(self.bot, "whois_sync"):
                 info = self.bot.whois_sync(nick, timeout=5) or {}
                 ident = info.get("user") or info.get("ident") or "*"
-                host  = info.get("host") or ""
+                host = info.get("host") or ""
                 if host and host != "*":
                     return f"{ident}@{host}"
         except Exception:
@@ -660,10 +757,8 @@ class DCCManager:
         return lst
 
     def _is_botlink_user(self, nick: str) -> bool:
-        # runtime allowlist
         if nick.lower() in self.link_peers:
             return True
-        # USERSSETTINGS: botlink=1
         try:
             uid = None
             uid = getattr(self.bot.sql, "sqlite_get_user_by_handle", lambda *a, **k: None)(self.bot.botId, nick)
@@ -691,9 +786,7 @@ class DCCManager:
                 n += 1
         return n
 
-    # ========== endpoint din DB (pentru force_connect fără CTCP) ==========
     def _peer_endpoint_from_db(self, peer: str) -> Optional[tuple[str, int]]:
-        """Citește din DB setările botlink_ip/botlink_port pentru <peer>."""
         try:
             sql = self.bot.sql
             botId = self.bot.botId
@@ -723,10 +816,6 @@ class DCCManager:
         return "connecting"
 
     def force_connect(self, peer: str, *, feedback: Optional[str] = None) -> bool:
-        """
-        Forțează o conexiune TCP outbound către endpoint-ul peer-ului (botlink_ip/botlink_port). Nu trimite CTCP.
-        """
-        # conexiune unică pentru boți
         if self._is_botlink_user(peer) and self._has_open_session(peer):
             return True
 
@@ -754,7 +843,6 @@ class DCCManager:
             else:
                 sess.outbound_offer = False
                 sess.meta.update({"ip": ip, "port": str(port), "botlink": "1", "hostmask": f"*@{ip}"})
-            # timbru pentru cooldown extern
             sess.meta["last_fc_ts"] = str(time.time())
             return True
         except Exception as e:
@@ -801,12 +889,6 @@ class DCCManager:
                 pass
 
     def _maintain_botlink(self):
-        """
-        Pentru fiecare peer:
-          - dacă avem endpoint în DB -> force_connect (outbound TCP direct, cu cooldown)
-          - altfel, trimitem O SINGURĂ ofertă CTCP (rate-limited)
-          - menținem keepalive pe sesiunile deschise; închidem idle (DOAR pentru botlink)
-        """
         if (time.time() - getattr(self, "_last_peers_refresh", 0)) >= max(10, self._peers_refresh_interval):
             self._refresh_link_peers_from_db()
             self._last_peers_refresh = time.time()
@@ -818,7 +900,6 @@ class DCCManager:
             low = peer.lower()
             sess = self.sessions.get(low)
 
-            # (A) dacă există sesiune deschisă -> keepalive + idle (doar botlink)
             if sess and sess.transport:
                 is_bot = (sess.meta.get("botlink") == "1")
                 if is_bot:
@@ -837,15 +918,13 @@ class DCCManager:
                             self._close_session(peer)
                         except:
                             pass
-                # pentru useri: nu ping, nu închidere aici
                 continue
 
-            # (B) NU e deschisă o sesiune -> încearcă endpoint direct dacă există, dar cu cooldown
             if self.has_endpoint(peer):
                 last_fc = 0.0
                 if sess and isinstance(sess.meta, dict):
                     last_fc = float(sess.meta.get("last_fc_ts", "0") or 0)
-                if (now - last_fc) >= 20:  # cooldown 20s
+                if (now - last_fc) >= 20:
                     if not sess:
                         self.sessions[low] = DCCSession(peer_nick=peer, outbound_offer=False, meta={})
                         sess = self.sessions[low]
@@ -853,20 +932,17 @@ class DCCManager:
                     self.force_connect(peer)
                 continue
 
-            # (C) fallback: CTCP DCC CHAT, dar cu rate limit și deduplicare
             can_offer = True
             last_offer = 0.0
             if sess and isinstance(sess.meta, dict):
                 last_offer = float(sess.meta.get("last_offer_ts", "0") or 0)
-                can_offer = (now - last_offer) >= 20  # 20s rate-limit
+                can_offer = (now - last_offer) >= 20
 
             if can_offer:
                 if not sess:
-                    # pregătește un stub ca să ţinem last_offer_ts
                     self.sessions[low] = DCCSession(peer_nick=peer, outbound_offer=True, meta={})
                     sess = self.sessions[low]
                 sess.meta["last_offer_ts"] = str(now)
-                # NU băga acelaşi peer de mai multe ori în FIFO
                 self.pending_offers = [p for p in self.pending_offers if p.get("nick", "").lower() != low]
                 self.pending_offers.append({"nick": peer, "ts": now})
                 try:
@@ -874,7 +950,6 @@ class DCCManager:
                 except Exception:
                     pass
 
-        # (D) închide conexiuni rătăcite DOAR pentru botlink care nu mai sunt în allowlist
         allow = {p.lower() for p in self.link_peers}
         for nick, s in list(self.sessions.items()):
             if s.meta.get("botlink") == "1" and (nick not in allow) and not self.allow_unauthed:
@@ -884,9 +959,6 @@ class DCCManager:
                     pass
 
     def _refresh_link_peers_from_db(self) -> None:
-        """
-        Populează self.link_peers cu toți userii care au botlink=1 în USERSSETTINGS.
-        """
         try:
             sql = getattr(self.bot, "sql", None)
             botId = getattr(self.bot, "botId", None)
@@ -908,22 +980,13 @@ class DCCManager:
         except Exception as e:
             logger.warning("[botlink] refresh from DB failed: %s", e)
 
-    # ─────────────────────────────────────────────────────────────
-    # MOD: worker global monitorizat (ThreadWorker: supervisor+child)
-    # ─────────────────────────────────────────────────────────────
     @classmethod
     def start_global_botlink_autoconnect(cls, *, interval: int = 30):
-        """
-        Pornește un singur worker global care iterează peste toate instanțele DCCManager
-        și le rulează menținerea (keepalive + reconect). Folosește ThreadWorker cu
-        provide_signals=True ca să apară în !status ca botlink_autoconnect(✅).
-        """
-        # evită dublarea (dacă deja rulează un supervisor/child cu același nume)
         for t in threading.enumerate():
-            if t.name in (cls._global_worker_name, f"{cls._global_worker_name}.child") and getattr(t, "is_alive", lambda: False)():
+            if t.name in (cls._global_worker_name, f"{cls._global_worker_name}.child") and getattr(t, "is_alive",
+                                                                                                   lambda: False)():
                 return
 
-        # target compatibil ThreadWorker: primește (stop_event, beat)
         def _target(stop_event, beat):
             cls._global_loop(stop_event, beat, interval)
 
@@ -950,9 +1013,7 @@ class DCCManager:
         while not stop_event.is_set():
             started = time.time()
             try:
-                # „beat” pentru watchdog (înainte și după ciclu)
                 beat()
-                # instantaneează lista instanțelor pt. a evita mutații în timpul iterării
                 with cls._registry_lock:
                     managers = list(cls._registry)
 
@@ -962,20 +1023,45 @@ class DCCManager:
                         mgr._gc_pending_offers()
                         if hasattr(mgr, "_maintain_botlink"):
                             mgr._maintain_botlink()
-                        # „beat” periodic în timpul buclei, dacă sunt multe peers
                         beat()
                     except Exception as e:
                         logger.warning("[global] tick error for %r: %s", getattr(mgr.bot, "nickname", mgr), e)
 
                 backoff = interval
             except Exception as e:
-                # eroare la nivel global — crește puțin backoff-ul cu plafon
                 logger.warning("[global] loop error: %s", e)
                 backoff = min(max(cls._global_backoff_default, int(backoff * 1.5)), max(60, interval))
 
-            # ține cont de timpul de execuție
             elapsed = time.time() - started
             delay = max(1, backoff - int(elapsed))
-            # așteptare întreruptibilă
             if stop_event.wait(delay):
                 break
+
+
+def broadcast_log_to_dcc(message: str):
+    def _safe_broadcast():
+        with DCCManager._registry_lock:
+            managers = list(DCCManager._registry)
+
+        if not managers:
+            return
+
+        for manager in managers:
+            if not manager.sessions:
+                continue
+
+            for session in list(manager.sessions.values()):
+                if not session.transport:
+                    continue
+                if session.meta.get("botlink") == "1":
+                    continue
+                try:
+                    payload = (message + "\r\n").encode('utf-8', errors='replace')
+                    session.transport.write(payload)
+                except Exception:
+                    pass
+
+    reactor.callFromThread(_safe_broadcast)
+
+
+log.register_dcc_callback(broadcast_log_to_dcc)

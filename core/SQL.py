@@ -3,99 +3,206 @@ import sqlite3
 import Variables as v
 import datetime
 import threading
+from queue import Queue, Empty
 from core.log import get_logger
 
 logger = get_logger("sql")
 
+
 class SQL:
-    def __init__(self, sqlite3_database):
+    def __init__(self, sqlite3_database, pool_size=5):
         self.database = sqlite3_database
         self._lock = threading.RLock()
-        self._conn = self._create_persistent_connection()
+        self._pool_size = pool_size
+        self._connection_pool = Queue(maxsize=pool_size)
+        self._pool_lock = threading.Lock()
 
-    def _create_persistent_connection(self):
+        # Initialize connection pool
+        try:
+            for _ in range(pool_size):
+                conn = self._create_connection()
+                self._connection_pool.put(conn)
+            logger.info(f"SQL connection pool initialized with {pool_size} connections")
+        except Exception as e:
+            logger.error(f"Failed to initialize connection pool: {e}", exc_info=True)
+            raise
+
+    def _create_connection(self):
+        """Create a single SQLite connection with optimal settings"""
         try:
             conn = sqlite3.connect(
                 self.database,
                 check_same_thread=False,
-                isolation_level=None,
-                timeout=5.0,
+                isolation_level=None,  # Autocommit mode
+                timeout=30.0,  # Increased from 5.0 to 30.0 seconds
                 detect_types=0
             )
+            # Optimize SQLite settings
             conn.execute("PRAGMA foreign_keys=ON;")
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute("PRAGMA temp_store=MEMORY;")
             conn.execute("PRAGMA cache_size=-2000;")
-            conn.execute("PRAGMA busy_timeout=3000;")
+            conn.execute("PRAGMA busy_timeout=10000;")  # 10 seconds busy timeout
             return conn
         except Exception as e:
             logger.error("SQLite connection failed for '%s': %s", self.database, e, exc_info=True)
             raise
 
+    def _get_connection(self, timeout=10.0):
+        """Get a connection from the pool with timeout"""
+        try:
+            conn = self._connection_pool.get(timeout=timeout)
+            # Verify connection is still valid
+            try:
+                conn.execute("SELECT 1")
+                return conn
+            except Exception as e:
+                logger.warning(f"Invalid connection in pool, creating new one: {e}")
+                # Connection is broken, create a new one
+                try:
+                    new_conn = self._create_connection()
+                    return new_conn
+                except:
+                    # If we can't create a new connection, put the old one back and raise
+                    self._connection_pool.put(conn)
+                    raise
+        except Empty:
+            logger.error("Connection pool timeout - no connections available")
+            raise RuntimeError("Database connection pool exhausted")
+
+    def _return_connection(self, conn):
+        """Return a connection to the pool"""
+        try:
+            self._connection_pool.put(conn, timeout=1.0)
+        except Exception as e:
+            logger.error(f"Failed to return connection to pool: {e}")
+            # Close the connection if we can't return it
+            try:
+                conn.close()
+            except:
+                pass
+
     def create_connection(self):
-        return self._conn
+        """Legacy method for backward compatibility - gets connection from pool"""
+        return self._get_connection()
+
+    def close_connection(self):
+        """Close all connections in the pool"""
+        with self._pool_lock:
+            while not self._connection_pool.empty():
+                try:
+                    conn = self._connection_pool.get_nowait()
+                    conn.close()
+                except Empty:
+                    break
+                except Exception as e:
+                    logger.error(f"Error closing connection: {e}")
+
+    def _execute_with_retry(self, operation, max_retries=3):
+        """Execute a database operation with retry logic for deadlocks"""
+        last_error = None
+        for attempt in range(max_retries):
+            conn = None
+            try:
+                conn = self._get_connection()
+                result = operation(conn)
+                self._return_connection(conn)
+                return result
+            except sqlite3.OperationalError as e:
+                if conn:
+                    self._return_connection(conn)
+
+                error_msg = str(e).lower()
+                if "locked" in error_msg or "busy" in error_msg:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        # Exponential backoff
+                        wait_time = 0.1 * (2 ** attempt)
+                        logger.warning(
+                            f"Database locked, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                else:
+                    # Not a lock error, don't retry
+                    raise
+            except Exception as e:
+                if conn:
+                    self._return_connection(conn)
+                raise
+
+        # All retries exhausted
+        logger.error(f"Database operation failed after {max_retries} retries: {last_error}")
+        raise last_error
 
     ##
     # execute method
     def sqlite3_execute(self, sql):
-        with self._lock:
-            conn = self.create_connection()
-            cur = conn.cursor()
-            try:
-                out = cur.execute(sql)
-                conn.commit()
-                return out
-            except Exception as e:
-                logger.error("EXEC failed: %s | error=%s", sql, e, exc_info=True)
-                raise
-            finally:
-                cur.close()
+        def operation(conn):
+            with self._lock:
+                cur = conn.cursor()
+                try:
+                    out = cur.execute(sql)
+                    conn.commit()
+                    return out
+                except Exception as e:
+                    logger.error("EXEC failed: %s | error=%s", sql, e, exc_info=True)
+                    raise
+                finally:
+                    cur.close()
+
+        return self._execute_with_retry(operation)
 
     def sqlite3_update(self, sql, params):
-        with self._lock:
-            conn = self.create_connection()
-            cur = conn.cursor()
-            try:
-                out = cur.execute(sql, params)
-                conn.commit()
-                return out
-            except Exception as e:
-                logger.error("UPDATE failed: %s | params=%s | error=%s", sql, params, e, exc_info=True)
-                raise
-            finally:
-                cur.close()
+        def operation(conn):
+            with self._lock:
+                cur = conn.cursor()
+                try:
+                    out = cur.execute(sql, params)
+                    conn.commit()
+                    return out
+                except Exception as e:
+                    logger.error("UPDATE failed: %s | params=%s | error=%s", sql, params, e, exc_info=True)
+                    raise
+                finally:
+                    cur.close()
+
+        return self._execute_with_retry(operation)
 
     def sqlite3_insert(self, sql, params):
-        with self._lock:
-            conn = self.create_connection()
-            cur = conn.cursor()
-            try:
-                cur.execute(sql, params)
-                last_row_id = cur.lastrowid
-                conn.commit()
-                return last_row_id
-            except Exception as e:
-                logger.error("INSERT failed: %s | params=%s | error=%s", sql, params, e, exc_info=True)
-                raise
-            finally:
-                cur.close()
+        def operation(conn):
+            with self._lock:
+                cur = conn.cursor()
+                try:
+                    cur.execute(sql, params)
+                    last_row_id = cur.lastrowid
+                    conn.commit()
+                    return last_row_id
+                except Exception as e:
+                    logger.error("INSERT failed: %s | params=%s | error=%s", sql, params, e, exc_info=True)
+                    raise
+                finally:
+                    cur.close()
+
+        return self._execute_with_retry(operation)
 
     def sqlite_select(self, query, params=None):
-        with self._lock:
-            conn = self.create_connection()
-            cur = conn.cursor()
-            try:
-                if params is not None:
-                    cur.execute(query, params)
-                else:
-                    cur.execute(query)
-                return cur.fetchall()
-            except Exception as e:
-                logger.error("SELECT failed: %s | params=%s | error=%s", query, params, e, exc_info=True)
-                raise
-            finally:
-                cur.close()
+        def operation(conn):
+            with self._lock:
+                cur = conn.cursor()
+                try:
+                    if params is not None:
+                        cur.execute(query, params)
+                    else:
+                        cur.execute(query)
+                    return cur.fetchall()
+                except Exception as e:
+                    logger.error("SELECT failed: %s | params=%s | error=%s", query, params, e, exc_info=True)
+                    raise
+                finally:
+                    cur.close()
+
+        return self._execute_with_retry(operation)
 
     def sqlite_add_ban(self, *,
                        botId,

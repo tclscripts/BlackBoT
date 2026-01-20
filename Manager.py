@@ -61,6 +61,10 @@ class BotInstanceConfig:
     port: int = 6667
     ssl_enabled: bool = False
 
+    # Stats / Web UI (FastAPI)
+    stats_api_port: int = 8000
+    stats_api_host: str = "0.0.0.0"
+
     ssl_cert_file: str = ""
     ssl_key_file: str = ""
 
@@ -318,6 +322,22 @@ class UnifiedBlackBotManager:
             dcc_port = self._get_next_available_port()
             print_info(f"Assigned DCC port: {dcc_port}")
 
+            # ─────────────────────────────────────────────
+            # Stats API (FastAPI) Port auto-assign
+            # ─────────────────────────────────────────────
+            stats_api_port = self._get_next_available_stats_port(8000)
+            print_info(f"Assigned Stats API port: {stats_api_port}")
+
+            override = print_question(
+                f"Change Stats API port? [enter to keep {stats_api_port}]: "
+            ).strip()
+
+            if override:
+                try:
+                    stats_api_port = int(override)
+                except:
+                    pass
+
             # Other settings with defaults
             message_delay = 1.5
             advanced = print_question("Configure advanced settings (delays, logging)? [y/N]: ").lower().startswith('y')
@@ -362,6 +382,8 @@ class UnifiedBlackBotManager:
                 nickserv_password=nickserv_password,
                 environment=environment,
                 dcc_port=dcc_port,
+                stats_api_port=stats_api_port,
+                stats_api_host="0.0.0.0",
                 message_delay=message_delay,
                 log_level=log_level,
                 auto_start=auto_start,
@@ -436,6 +458,50 @@ class UnifiedBlackBotManager:
             port += 1
 
         return port
+
+    def _get_next_available_stats_port(self, start_port: int = 8000) -> int:
+        """Get next available Stats API port (avoid conflicts between instances)."""
+        used = {getattr(cfg, "stats_api_port", 8000) for cfg in self.instances.values()}
+
+        port = start_port
+        while port in used:
+            port += 1
+        return port
+
+    def _ensure_stats_port_in_env(self, instance_dir: str, cfg) -> None:
+        env_path = os.path.join(instance_dir, ".env")
+        if not os.path.exists(env_path):
+            return
+
+        with open(env_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # dacă există deja, nu facem nimic
+        if "STATS_API_PORT=" in content:
+            return
+
+        # alocăm un port liber (în funcție de instanțele deja încărcate)
+        port = getattr(cfg, "stats_api_port", None) or self._get_next_available_stats_port(8000)
+        host = getattr(cfg, "stats_api_host", "0.0.0.0")
+
+        patch = (
+            "\n# ─────────────────────────────────────────────\n"
+            "# Stats / Web UI (FastAPI)\n"
+            "# ─────────────────────────────────────────────\n"
+            f"STATS_API_ENABLED=true\n"
+            f"STATS_API_HOST={host}\n"
+            f"STATS_API_PORT={port}\n"
+        )
+
+        with open(env_path, "a", encoding="utf-8") as f:
+            f.write(patch)
+
+        # opțional: update și în cfg în memorie
+        try:
+            cfg.stats_api_port = port
+            cfg.stats_api_host = host
+        except:
+            pass
 
     def _create_instance_files(self, config: BotInstanceConfig) -> bool:
         """Create all files for an instance"""
@@ -616,6 +682,15 @@ BLACKBOT_MANAGER_VERSION="Unified Manager 2.0"
 # You can edit values manually, but structure changes may be overwritten
 # For advanced configuration, use config/{config.environment}.yaml if available
 # Instance created: {datetime.now().isoformat()}
+
+# ═══════════════════════════════════════════════════════════════════
+# Stats
+# ═══════════════════════════════════════════════════════════════════
+
+STATS_API_ENABLED=true
+STATS_API_HOST=0.0.0.0
+STATS_API_PORT={config.stats_api_port}
+
 """
 
         return env_content
@@ -722,8 +797,12 @@ BLACKBOT_MANAGER_VERSION="Unified Manager 2.0"
                     pass
                 return "stopped"
 
+
     def start_instance(self, name: str, background: bool = True) -> bool:
         """Start a bot instance with full environment setup"""
+        from core.deps import ensure_packages
+        import socket
+
         if name not in self.instances:
             print_error(f"Instance '{name}' not found")
             return False
@@ -738,6 +817,150 @@ BLACKBOT_MANAGER_VERSION="Unified Manager 2.0"
         if self.get_instance_status(name) == "running":
             print_warning(f"Instance '{name}' is already running")
             return True
+
+        # -----------------------------
+        # Helpers (stats port selection)
+        # -----------------------------
+        def _is_port_free(host: str, port: int) -> bool:
+            """Check if (host, port) can be bound now."""
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind((host, int(port)))
+                return True
+            except OSError:
+                return False
+
+        def _wait_for_port(host: str, port: int, wait_total: float = 6.0, step: float = 0.25) -> bool:
+            deadline = time.time() + wait_total
+            while time.time() < deadline:
+                if _is_port_free(host, port):
+                    return True
+                time.sleep(step)
+            return _is_port_free(host, port)
+
+        def _pick_free_port(host: str, start_port: int, used_ports: set[int], max_tries: int = 200) -> int:
+            # 1) încearcă întâi portul dorit, cu WAIT (fix pentru restart)
+            if start_port not in used_ports:
+                if _wait_for_port(host, start_port, wait_total=6.0, step=0.25):
+                    return int(start_port)
+
+            # 2) altfel, următoarele
+            p = int(start_port) + 1
+            for _ in range(max_tries):
+                if p not in used_ports and _is_port_free(host, p):
+                    return p
+                p += 1
+
+            return int(start_port)
+
+        def _to_bool_str(v: str) -> str:
+            return str(v).strip().lower()
+
+        def _ensure_stats_env(env: dict, env_file_path) -> None:
+            """
+            Ensures STATS_API_* are present.
+            If port is busy, auto-increments to next free.
+            Also patches .env for old instances lacking variables.
+            """
+            # ----- desired defaults -----
+            default_host = getattr(config, "stats_api_host", "0.0.0.0")
+            default_port = getattr(config, "stats_api_port", 8000)
+            default_enabled = "true"
+
+            # ----- read existing -----
+            api_enabled = env.get("STATS_API_ENABLED", default_enabled)
+            api_host = env.get("STATS_API_HOST", default_host)
+            api_port_raw = env.get("STATS_API_PORT", str(default_port))
+
+            # normalize
+            api_host = (api_host or default_host).strip()
+            try:
+                api_port = int(str(api_port_raw).strip())
+            except Exception:
+                api_port = int(default_port)
+
+            # Build "used ports" from other instances (best-effort)
+            used_ports = set()
+            try:
+                for inst_name, inst_cfg in self.instances.items():
+                    if inst_name == name:
+                        continue
+                    p = getattr(inst_cfg, "stats_api_port", None)
+                    if isinstance(p, int):
+                        used_ports.add(p)
+            except Exception:
+                pass
+
+            # If old bots don't have stats_api_port set in config, we at least
+            # avoid conflicts by checking bind() anyway.
+            chosen = api_port
+
+            # Only bother if stats api is enabled
+            if _to_bool_str(api_enabled) in ("1", "true", "yes", "y", "on", "enable", "enabled"):
+                if not _is_port_free(api_host, chosen) or chosen in used_ports:
+                    new_port = _pick_free_port(api_host, chosen, used_ports)
+                    if new_port != chosen:
+                        print_warning(f"Stats API port {chosen} is busy; switching to {new_port}")
+                        chosen = new_port
+
+            # Write back into env (process env)
+            env["STATS_API_ENABLED"] = str(api_enabled).strip() or default_enabled
+            env["STATS_API_HOST"] = api_host
+            env["STATS_API_PORT"] = str(chosen)
+
+            # Keep config updated in-memory (so summaries / future allocations can see it)
+            try:
+                config.stats_api_host = api_host
+                config.stats_api_port = int(chosen)
+            except Exception:
+                pass
+
+            # Patch .env if missing OR if we had to switch port
+            try:
+                if env_file_path and env_file_path.exists():
+                    with open(env_file_path, "r", encoding="utf-8", errors="replace") as f:
+                        raw = f.read()
+
+                    needs_enabled = "STATS_API_ENABLED=" not in raw
+                    needs_host = "STATS_API_HOST=" not in raw
+                    needs_port = "STATS_API_PORT=" not in raw
+
+                    # If port existed but we switched due to busy, update it in file
+                    switched = False
+                    if not needs_port:
+                        # naive replace line
+                        import re
+                        new_raw, n = re.subn(
+                            r"(?m)^\s*STATS_API_PORT\s*=\s*.*$",
+                            f"STATS_API_PORT={chosen}",
+                            raw
+                        )
+                        if n > 0 and new_raw != raw:
+                            raw = new_raw
+                            switched = True
+
+                    if needs_enabled or needs_host or needs_port:
+                        patch = (
+                            "\n# ═══════════════════════════════════════════════════════════════════\n"
+                            "# Stats\n"
+                            "# ═══════════════════════════════════════════════════════════════════\n"
+                        )
+                        if needs_enabled:
+                            patch += f"STATS_API_ENABLED={env['STATS_API_ENABLED']}\n"
+                        if needs_host:
+                            patch += f"STATS_API_HOST={env['STATS_API_HOST']}\n"
+                        if needs_port:
+                            patch += f"STATS_API_PORT={env['STATS_API_PORT']}\n"
+
+                        raw = raw.rstrip() + "\n" + patch
+
+                    if (needs_enabled or needs_host or needs_port) or switched:
+                        with open(env_file_path, "w", encoding="utf-8", errors="replace") as f:
+                            f.write(raw)
+                        print_info(f"📌 Updated .env stats settings for '{name}' (STATS_API_PORT={chosen})")
+            except Exception as e:
+                print_warning(f"Could not patch .env stats variables: {e}")
 
         try:
             print_info(f"Starting instance '{name}'...")
@@ -755,6 +978,14 @@ BLACKBOT_MANAGER_VERSION="Unified Manager 2.0"
                         if line and not line.startswith('#') and '=' in line:
                             key, value = line.split('=', 1)
                             env[key.strip()] = value.strip().strip('"\'')
+            else:
+                # dacă nu există, nu e fatal, dar stats autofix va putea doar să seteze env runtime
+                pass
+
+            # ═══════════════════════════════════════════════════════════════════
+            # STATS PORT AUTO-FIX (pentru multi-instante + roboți vechi)
+            # ═══════════════════════════════════════════════════════════════════
+            _ensure_stats_env(env, env_file)
 
             # variabile pentru instanță
             env.update({
@@ -781,6 +1012,15 @@ BLACKBOT_MANAGER_VERSION="Unified Manager 2.0"
                 candidate = python_exec[:-len("python.exe")] + "pythonw.exe"
                 if os.path.exists(candidate):
                     python_exec = candidate
+
+            # pachetele de care ai nevoie acum (poți extinde lista)
+            required = ["fastapi", "uvicorn", "pydantic"]
+
+            ok = ensure_packages(required, python_exec=python_exec, env=env, cwd=str(self.base_dir))
+            if not ok:
+                print_error("❌ Dependency installation failed. Check pip / permissions / venv.")
+                return False
+            print_success("✅ Dependencies OK")
 
             cmd = [python_exec, startup_file]
 
@@ -836,6 +1076,12 @@ BLACKBOT_MANAGER_VERSION="Unified Manager 2.0"
                     this_script = _P(sys.argv[0]).name
                     print_success(f"Instance '{name}' started successfully (PID: {process.pid})")
                     print_info(f"📋 Log file: {config.log_file}")
+                    # util: arată portul stats
+                    try:
+                        print_info(
+                            f"🌐 Stats UI: http://{env.get('STATS_API_HOST', '0.0.0.0')}:{env.get('STATS_API_PORT', '8000')}/ui/<channel>")
+                    except Exception:
+                        pass
                     return True
                 else:
                     print_error(f"Instance '{name}' failed to start")

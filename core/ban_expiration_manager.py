@@ -32,7 +32,6 @@ def _normalize_banmask_for_mode(ban_mask: str, ident: str | None, host: str | No
     return mask
 
 
-
 class BanExpirationManager:
     """
     Manages ban expiration with a single optimized timer thread.
@@ -56,19 +55,17 @@ class BanExpirationManager:
         self._next_expiration = None  # (ban_id, expires_at, table, channel)
         self._running = False
 
-        logger.info("🕐 BanExpirationManager initialized")
 
     def start(self):
         """Start the ban expiration manager."""
         with self._lock:
             if self._running:
-                logger.warning("BanExpirationManager already running")
+                logger.warning("Ban Expiration Manager already running")
                 return
 
             self._running = True
             # Find the next ban to expire and start monitoring
             self._schedule_next_expiration()
-            logger.info("✅ BanExpirationManager started")
 
     def stop(self):
         """Stop the ban expiration manager (idempotent)."""
@@ -81,12 +78,19 @@ class BanExpirationManager:
             if self._timer_thread:
                 try:
                     self._timer_thread.stop()
+                    # FIXED: Wait for thread to actually stop
+                    if self._timer_thread.is_alive():
+                        logger.debug("Waiting for timer thread to finish...")
+                        self._timer_thread.join(timeout=5.0)
+                        if self._timer_thread.is_alive():
+                            logger.warning("Timer thread did not stop gracefully within 5 seconds")
+                        else:
+                            logger.debug("Timer thread stopped successfully")
                 except Exception as e:
-                    logger.error(f"Error stopping timer thread: {e}")
+                    logger.error(f"Error stopping timer thread: {e}", exc_info=True)
                 finally:
                     self._timer_thread = None
 
-            logger.info("🛑 BanExpirationManager stopped")
 
     def _get_next_expiring_ban(self):
         """
@@ -132,13 +136,28 @@ class BanExpirationManager:
         Cancels any existing timer and creates a new one.
         """
         with self._lock:
-            # Stop existing timer if any
+            # Stop existing timer if any - FIXED VERSION
             if self._timer_thread:
                 try:
+                    logger.debug("Stopping existing timer thread...")
                     self._timer_thread.stop()
-                    self._timer_thread = None
+
+                    # Wait for thread to actually finish
+                    if self._timer_thread.is_alive():
+                        self._timer_thread.join(timeout=2.0)
+
+                        if self._timer_thread.is_alive():
+                            logger.warning(
+                                f"Timer thread '{self._timer_thread.name}' did not stop within 2 seconds"
+                            )
+                        else:
+                            logger.debug("Timer thread stopped successfully")
+
                 except Exception as e:
-                    logger.error(f"Error stopping existing timer: {e}")
+                    logger.error(f"Error stopping existing timer: {e}", exc_info=True)
+                finally:
+                    # Always clear the reference
+                    self._timer_thread = None
 
             if not self._running:
                 return
@@ -184,7 +203,12 @@ class BanExpirationManager:
             delay = expires_at - now
 
             if delay > 0:
-                time.sleep(delay)
+                # FIXED: Use stop event for interruptible sleep
+                stop_event = get_event(f"ban_expiration_{ban_id}")
+                if stop_event.wait(timeout=delay):
+                    # Stop was requested
+                    logger.debug(f"Ban expiration timer for {ban_id} was stopped early")
+                    return
 
             # Check if we should still proceed (bot might have stopped)
             if not self._running:
@@ -199,7 +223,10 @@ class BanExpirationManager:
         except Exception as e:
             logger.error(f"Error in expiration timer worker: {e}", exc_info=True)
             # Try to schedule next anyway
-            self._schedule_next_expiration()
+            try:
+                self._schedule_next_expiration()
+            except Exception as inner_e:
+                logger.error(f"Failed to schedule next expiration after error: {inner_e}")
 
     def _expire_ban(self, ban_id, table, channel):
         """
@@ -214,88 +241,52 @@ class BanExpirationManager:
             # Get ban details before removing
             if table == 'BANS_LOCAL':
                 query = "SELECT ban_mask, ban_type, channel FROM BANS_LOCAL WHERE id = ?"
-            else:
-                query = "SELECT ban_mask, ban_type, NULL FROM BANS_GLOBAL WHERE id = ?"
+                result = self.sql.sqlite_select(query, (ban_id,))
 
-            result = self.sql.sqlite_select(query, (ban_id,))
+                if not result:
+                    logger.warning(f"Ban ID {ban_id} not found in BANS_LOCAL")
+                    return
 
-            if not result:
-                logger.warning(f"Ban ID {ban_id} not found in {table}")
-                return
+                ban_mask, ban_type, ban_channel = result[0]
 
-            ban_mask, ban_type, ban_channel = result[0]
+                # Remove from database
+                self.sql.sqlite_remove_ban_by_id(ban_id, local=True)
 
-            # Remove from database
-            if table == 'BANS_LOCAL':
-                self.sql.sqlite3_update("DELETE FROM BANS_LOCAL WHERE id = ?", (ban_id,))
-            else:
-                self.sql.sqlite3_update("DELETE FROM BANS_GLOBAL WHERE id = ?", (ban_id,))
+                # Remove from IRC channel if bot is in it
+                if ban_channel in self.bot.channels:
+                    try:
+                        # Get user info if available to construct proper unban mask
+                        mode_mask = _normalize_banmask_for_mode(ban_mask, None, None, ban_type)
+                        self.bot.sendLine(f"MODE {ban_channel} -b {mode_mask}")
+                        logger.info(f"🔓 Expired local ban ID={ban_id} in {ban_channel}: {ban_mask}")
+                    except Exception as e:
+                        logger.error(f"Failed to unban in IRC: {e}")
 
-            scope = f"channel {ban_channel or channel}" if table == 'BANS_LOCAL' else "global"
-            logger.info(f"⏱️ Ban expired: ID={ban_id} mask={ban_mask} ({scope})")
+            else:  # BANS_GLOBAL
+                query = "SELECT ban_mask, ban_type FROM BANS_GLOBAL WHERE id = ?"
+                result = self.sql.sqlite_select(query, (ban_id,))
 
-            # Remove ban from IRC channel(s)
-            channels_to_unban = []
+                if not result:
+                    logger.warning(f"Ban ID {ban_id} not found in BANS_GLOBAL")
+                    return
 
-            if table == 'BANS_LOCAL' and ban_channel:
-                channels_to_unban = [ban_channel]
-            elif table == 'BANS_GLOBAL':
-                # Global bans apply to all channels
-                channels_to_unban = [ch for ch in self.bot.channels if ch.startswith('#')]
+                ban_mask, ban_type = result[0]
 
-            # Remove MODE +b from channels
-            for ch in channels_to_unban:
-                try:
-                    # For IRC MODE -b, we need a simple mask without realname
-                    mode_mask = _normalize_banmask_for_mode(ban_mask)
-                    self.bot.sendLine(f"MODE {ch} -b {mode_mask}")
-                    logger.info(f"🔓 Removed ban {mode_mask} from {ch}")
-                except Exception as e:
-                    logger.error(f"Error removing ban from {ch}: {e}")
+                # Remove from database
+                self.sql.sqlite_remove_ban_by_id(ban_id, local=False)
+
+                # Remove from all channels the bot is in
+                for chan in self.bot.channels:
+                    try:
+                        mode_mask = _normalize_banmask_for_mode(ban_mask, None, None, ban_type)
+                        self.bot.sendLine(f"MODE {chan} -b {mode_mask}")
+                    except Exception as e:
+                        logger.error(f"Failed to unban in {chan}: {e}")
+
+                logger.info(f"🔓 Expired global ban ID={ban_id}: {ban_mask}")
 
         except Exception as e:
-            logger.error(f"Error expiring ban ID {ban_id}: {e}", exc_info=True)
-
-    def on_ban_added(self, ban_id, expires_at):
-        """
-        Called when a new ban is added to check if we need to reschedule.
-
-        Args:
-            ban_id: ID of the newly added ban
-            expires_at: Unix timestamp when the ban expires (or None if permanent)
-        """
-        if expires_at is None:
-            return  # Permanent ban, no expiration
-
-        with self._lock:
-            # Check if this ban expires sooner than the current one
-            if self._next_expiration is None:
-                # No timer running, schedule this one
-                self._schedule_next_expiration()
-            else:
-                current_expires = self._next_expiration[1]
-                if expires_at < current_expires:
-                    # This ban expires sooner, reschedule
-                    logger.info(f"🔄 Rescheduling: new ban ID={ban_id} expires sooner")
-                    self._schedule_next_expiration()
-
-    def _mode_mask_for_user(self, ban_mask: str, ban_type: str, ident: str | None, host: str | None) -> str:
-        """
-        Construiește masca pentru MODE +b când avem deja user-ul:
-        - taie :realname din ban_mask;
-        - dacă ban-ul e regex, cade pe *!ident@host.
-        """
-        # mai întâi normalizăm ban_mask-ul (fără realname)
-        mask = _normalize_banmask_for_mode(ban_mask)
-
-        bt = (ban_type or "mask").lower()
-        looks_regex = bt == "regex" or mask.startswith("^") or mask.endswith("$")
-        if looks_regex:
-            ident = ident or "*"
-            host = host or "*"
-            mask = f"*!{ident}@{host}"
-
-        return mask
+            logger.error(f"Error expiring ban {ban_id}: {e}", exc_info=True)
 
     def check_user_against_bans(self, channel, nick, ident, host, realname=None):
         """

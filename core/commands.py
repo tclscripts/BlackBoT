@@ -8,289 +8,342 @@ import core.seen as seen
 import re, shlex
 from core.environment_config import config
 from fnmatch import fnmatchcase
+from modules.stats.stats_user_analytics import get_analytics
+
+
 
 def cmd_unban(self, channel, feedback, nick, host, msg):
     """
     Usage:
-      !unban <nick>          → caută banuri care se potrivesc cu userul (folosind WHO/WHOIS)
-      !unban <mask> [-g]     → unban după hostmask exact (ex: *!*@bad.host)
+      !unban <nick>          → resolve nick (WHO) & remove ALL bans matching that user
+      !unban <mask|regex>    → remove specific matching ban mask from DB
+      !unban id:<number>     → remove specific ban by database ID
     """
+    import shlex
+    import re
+    from fnmatch import fnmatchcase
+
+    # --- 1. Permission Check ---
     if not self.check_command_access(channel, nick, host, '40', feedback):
         return
 
-    # tokenize
+    # --- 2. Arg Parse ---
     try:
         tokens = shlex.split(msg)
     except Exception:
         tokens = msg.split()
 
     if not tokens:
-        self.send_message(feedback, f"Usage: {config.char}unban <nick|mask>")
+        self.send_message(feedback, f"Usage: {config.char}unban <nick|mask|id:N> [-g]")
         return
 
     target = tokens[0]
     opts = tokens[1:]
-
     is_global = False
-    is_regex = False
 
-    # flags simple: -g, -regex (le folosim mai ales pentru branch-ul cu mask)
     for t in opts:
-        tl = t.lower()
-        if tl in ("-g", "--global"):
+        if t.lower() in ("-g", "--global"):
             is_global = True
-        elif tl in ("-regex", "--regex"):
-            is_regex = True
+
+    # ---------------------------------------------------------------------
+    # HELPERE INTERNE (Fixul tău este inclus aici)
+    # ---------------------------------------------------------------------
 
     def _normalize_banmask_for_mode(ban_mask: str) -> str:
-        """Scoate :realname, pentru a obține masca folosită la MODE +/-b"""
-        if not ban_mask:
-            return ban_mask
-        if ":" in ban_mask:
-            return ban_mask.split(":", 1)[0]
-        return ban_mask
+        if not ban_mask: return ""
+        return ban_mask.split(":", 1)[0] if ":" in ban_mask else ban_mask
 
-    def _ban_matches_user(ban_mask: str,
-                          ban_type: str,
-                          nick_: str,
-                          ident_: str,
-                          host_: str,
-                          realname_: str | None):
-        """
-        Verifică dacă banul (mask/regex) se potrivește cu userul dat.
-        """
-        ban_type = (ban_type or "mask").lower()
-        ident_ = ident_ or "*"
-        host_ = host_ or "*"
-        user_full = f"{nick_}!{ident_}@{host_}"
+    def _ban_matches_user(ban_mask, ban_type, u_nick, u_ident, u_host, u_real):
+        u_full = f"{u_nick}!{u_ident}@{u_host}"
+        b_type = (ban_type or "mask").lower()
 
-        if ban_type == "regex":
+        if b_type == "regex":
             try:
                 rx = re.compile(ban_mask)
-            except re.error:
-                return False
-
-            if rx.search(user_full):
-                return True
-
-            if realname_:
-                combo = f"{user_full}:{realname_}"
-                if rx.search(combo) or rx.search(realname_):
-                    return True
+                if rx.search(u_full): return True
+                if u_real and rx.search(f"{u_full}:{u_real}"): return True
+            except:
+                pass
             return False
-
-        # ban de tip "mask" clasic (*!*@host [:realname])
-        mask = ban_mask or ""
-        if ":" in mask:
-            main_mask, real_mask = mask.split(":", 1)
         else:
-            main_mask, real_mask = mask, None
-
-        if not fnmatchcase(user_full.lower(), main_mask.lower()):
-            return False
-
-        if real_mask is not None:
-            rn = realname_ or ""
-            if not fnmatchcase(rn.lower(), real_mask.lower()):
+            main_mask = ban_mask.split(":", 1)[0]
+            if not fnmatchcase(u_full.lower(), main_mask.lower()):
                 return False
+            if ":" in ban_mask:
+                req_real = ban_mask.split(":", 1)[1]
+                if not fnmatchcase((u_real or "").lower(), req_real.lower()):
+                    return False
+            return True
 
-        return True
+    # --- Helperul modificat de tine ---
+    def _perform_db_removal(ban_ids_to_remove, resolved_target_name=None):
+        # Numele pe care îl afișăm în mesajul de confirmare
+        display_name = resolved_target_name if resolved_target_name else target
 
-    # ─────────────────────────────────────────────
-    # BRANCH 1: target = nick (NU conține host)
-    # ─────────────────────────────────────────────
-    is_nick = ("@" not in target) and not any(ch in target for ch in ("*", "?", "!"))
-    if is_nick:
-        user_nick = target
+        if not ban_ids_to_remove:
+            self.send_message(feedback, f"ℹ️ No matching bans found for '{display_name}'.")
+            return
 
-        def _worker_unban_by_nick():
-            ident = None
-            host_ = None
-            realname = ""
+        removed_count = 0
 
-            # 1) Încearcă WHO <nick> sincron (botul trimite WHO și așteaptă răspuns)
-            info = None
-            if hasattr(self, "who_sync_nick"):
-                try:
-                    info = self.who_sync_nick(user_nick, timeout=5.0)
-                except Exception:
-                    info = None
+        if is_global:
+            auth_uid = self.get_logged_in_user_by_host(host)
+            if not auth_uid:
+                self.send_message(feedback, "❌ Authenticate first to remove global bans.")
+                return
+            max_flag = self.sql.sqlite_get_max_flag(self.botId, auth_uid)
+            if max_flag not in ("N", "n", "m"):
+                self.send_message(feedback, "❌ Insufficient access for global bans.")
+                return
 
-            if info:
-                ident = info.get("ident") or "*"
-                host_ = info.get("host") or "*"
-                realname = info.get("realname") or ""
-            else:
-                if hasattr(self, "channel_details"):
-                    for row in self.channel_details:
-                        # [channel, nick, ident, host, privileges, realname, userId]
-                        if not isinstance(row, (list, tuple)) or len(row) < 4:
-                            continue
-                        if (row[1] or "").lower() != user_nick.lower():
-                            continue
-                        ident = row[2]
-                        host_ = row[3]
-                        if len(row) > 5:
-                            realname = row[5] or ""
+        for b_id, b_mask, b_scope in ban_ids_to_remove:
+            if is_global and b_scope != "GLOBAL":
+                continue
+
+            try:
+                is_local = (b_scope == "LOCAL")
+                self.sql.sqlite_remove_ban_by_id(b_id, local=is_local)
+                removed_count += 1
+
+                if channel and channel.startswith("#"):
+                    has_op = True
+                    if hasattr(self, "_has_channel_op"):
+                        try:
+                            has_op = self._has_channel_op(channel)
+                        except:
+                            pass
+
+                    if has_op:
+                        clean_mask = _normalize_banmask_for_mode(b_mask)
+                        self.sendLine(f"MODE {channel} -b {clean_mask}")
+
+            except Exception as e:
+                if hasattr(self, 'logger'):
+                    self.logger.error(f"Failed to unban ID {b_id}: {e}")
+
+        if removed_count > 0:
+            self.send_message(feedback, f"✅ Removed {removed_count} ban(s) matching '{display_name}'.")
+        else:
+            self.send_message(feedback,
+                              f"ℹ️ Found matches for '{display_name}' but failed to remove (check perms/scope).")
+
+    # ---------------------------------------------------------------------
+    # RAMURI DE EXECUȚIE (Aici se oprea codul tău, am adăugat restul)
+    # ---------------------------------------------------------------------
+
+    # BRANCH 1: Remove by ID
+    if target.lower().startswith("id:"):
+        try:
+            bid = int(target.split(":", 1)[1])
+            self.sql.sqlite_remove_ban_by_id(bid, local=not is_global)
+            self.send_message(feedback, f"✅ Ban ID {bid} removed.")
+        except Exception as e:
+            self.send_message(feedback, f"❌ Error removing ID: {e}")
+        return
+
+    # BRANCH 2: Remove by Mask (Cu Smart Match pentru :realname)
+    looks_like_mask = any(c in target for c in ('!', '@', '*', '?', ':')) or target.startswith('^')
+
+    if looks_like_mask:
+        try:
+            active_bans = self.sql.sqlite_get_active_bans_for_channel(self.botId, channel)
+        except Exception as e:
+            self.send_message(feedback, f"SQL Error: {e}")
+            return
+
+        to_remove = []
+        for row in active_bans:
+            scope = row[0]
+            bid = row[1]
+            bmask = row[6]
+
+            # A. Match EXACT
+            if bmask == target:
+                to_remove.append((bid, bmask, scope))
+                continue
+
+            # B. Match "Smart" (ignora :realname din DB daca nu e dat in comanda)
+            if ':' in bmask and ':' not in target:
+                simple_mask_db = bmask.split(':', 1)[0]
+                if simple_mask_db == target:
+                    to_remove.append((bid, bmask, scope))
+
+        _perform_db_removal(to_remove)
+        return
+
+    # BRANCH 3: Remove by Nick (Async WHO)
+
+    def on_who_result(info):
+        if not info:
+            # Cache fallback
+            if hasattr(self, "channel_details"):
+                for row in self.channel_details:
+                    if len(row) > 3 and (row[1] or "").lower() == target.lower():
+                        info = {
+                            'nick': row[1], 'ident': row[2], 'host': row[3],
+                            'realname': row[5] if len(row) > 5 else ""
+                        }
                         break
 
-            if not host_:
-                self.send_message(
-                    feedback,
-                    f"❌ Unable to resolve host for {user_nick} (WHO and channel cache failed)."
-                )
-                return
+        if not info:
+            self.send_message(feedback, f"❌ Could not resolve address for '{target}'. Try unbanning by mask.")
+            return
 
-            ident_local = ident or "*"
-            realname_local = realname or ""
+        u_ident = info.get("ident", "*")
+        u_host = info.get("host", "*")
+        u_real = info.get("realname", "")
 
-            # verifică global access pentru -g
-            if is_global:
-                userId_issuer = self.get_logged_in_user_by_host(host)
-                if not userId_issuer:
-                    self.send_message(feedback, "❌ You must be authenticated to remove global bans.")
-                    return
+        # Construim numele complet pentru mesajul de succes
+        resolved_full_host = f"{target}!{u_ident}@{u_host}"
 
-                issuer_flag = self.sql.sqlite_get_max_flag(self.botId, userId_issuer)
-                if issuer_flag not in ("N", "n", "m"):
-                    self.send_message(feedback, "❌ You are not allowed to remove global bans.")
-                    return
-
-            # ia banurile active (LOCAL pe channel sau GLOBAL)
-            try:
-                bans = self.sql.sqlite_get_active_bans_for_channel(self.botId, channel)
-            except Exception as e:
-                self.send_message(feedback, f"❌ Error reading active bans: {e}")
-                return
-
-            removed = 0
-
-            for row in bans:
-                try:
-                    scope = row[0]  # 'GLOBAL' sau 'LOCAL'
-                    ban_id = row[1]
-                    _botId = row[2]
-                    ban_channel = row[3]
-                    ban_mask = row[6]
-                    ban_type = row[7]
-                except Exception:
-                    continue
-
-                if is_global and scope != "GLOBAL":
-                    continue
-
-                if not _ban_matches_user(ban_mask, ban_type,
-                                         user_nick, ident_local, host_, realname_local):
-                    continue
-
-                local_flag = (scope == "LOCAL")
-                try:
-                    self.sql.sqlite_remove_ban_by_id(ban_id, local=local_flag)
-                except Exception:
-                    if hasattr(self, "logger"):
-                        self.logger.exception(f"Error removing ban_id={ban_id}")
-                else:
-                    removed += 1
-
-                # scoate masca de pe canalul curent, dacă avem +o
-                if channel and channel.startswith("#") and hasattr(self, "_has_channel_op") and self._has_channel_op(
-                        channel):
-                    mode_mask = _normalize_banmask_for_mode(ban_mask)
-                    try:
-                        # thread-safe: trimite prin reactor
-                        self.sendline(f"MODE {channel} -b {mode_mask}")
-                    except Exception:
-                        pass
-
-            if removed == 0:
-                self.send_message(
-                    feedback,
-                    f"ℹ️ No active bans match {user_nick}!{ident_local}@{host_}."
-                )
-            else:
-                self.send_message(
-                    feedback,
-                    f"✅ Removed {removed} ban(s) matching {user_nick}!{ident_local}@{host_}."
-                )
-        ThreadWorker(target=_worker_unban_by_nick, name=f"unban_{user_nick}").start()
-        return
-
-    # ─────────────────────────────────────────────
-    # BRANCH 2: target = hostmask (conține !/@/*/?)
-    # ─────────────────────────────────────────────
-    # exact mask unban (simetric cu !ban mask)
-    store_channel = None if is_global or not (channel and channel.startswith("#")) else channel
-
-    # local sau global
-    try:
-        if store_channel:
-            # local bans pentru canal
-            rows = self.sql.sqlite_find_bans(self.botId, channel=store_channel, include_expired=False)
-            local_flag = True
-            # BANS_LOCAL: id, botId, channel, setter_userId, setter_nick, ban_mask, ban_type, ...
-            ban_mask_index = 5
-        else:
-            # global bans
-            rows = self.sql.sqlite_find_bans(self.botId, channel=None, include_expired=False)
-            local_flag = False
-            # BANS_GLOBAL: id, botId, setter_userId, setter_nick, ban_mask, ban_type, ...
-            ban_mask_index = 4
-    except Exception as e:
-        self.send_message(feedback, f"❌ Error reading bans: {e}")
-        return
-
-    removed = 0
-    for row in rows:
         try:
-            ban_id = row[0]
-            ban_mask = row[ban_mask_index]
-        except Exception:
-            continue
+            active_bans = self.sql.sqlite_get_active_bans_for_channel(self.botId, channel)
+        except Exception as e:
+            self.send_message(feedback, f"SQL Error: {e}")
+            return
 
-        if ban_mask != target:
-            continue
+        to_remove = []
+        for row in active_bans:
+            scope = row[0]
+            bid = row[1]
+            bmask = row[6]
+            btype = row[7]
 
-        # șterge din DB
-        try:
-            self.sql.sqlite_remove_ban_by_id(ban_id, local=local_flag)
-        except Exception:
-            if hasattr(self, "logger"):
-                self.logger.exception(f"Error removing ban_id={ban_id}")
-        else:
-            removed += 1
+            if _ban_matches_user(bmask, btype, target, u_ident, u_host, u_real):
+                to_remove.append((bid, bmask, scope))
 
-        # scoate masca de pe canal (doar dacă suntem într-un canal)
-        if channel and channel.startswith("#") and hasattr(self, "_has_channel_op") and self._has_channel_op(channel):
-            mode_mask = _normalize_banmask_for_mode(ban_mask)
-            try:
-                self.sendLine(f"MODE {channel} -b {mode_mask}")
-            except Exception:
-                pass
+        _perform_db_removal(to_remove, resolved_target_name=resolved_full_host)
 
-    if removed == 0:
-        self.send_message(feedback, f"ℹ️ No bans found matching mask: {target}")
+    def on_who_error(failure):
+        self.send_message(feedback, f"⚠️ Error resolving nick: {failure.getErrorMessage()}")
+
+    # Lansare Async
+    if hasattr(self, "get_user_info_async"):
+        d = self.get_user_info_async(target, timeout=5.0)
+        d.addCallback(on_who_result)
+        d.addErrback(on_who_error)
+        # IMPORTANT: RETURN pentru a opri orice alt cod vechi
+        return
     else:
-        scope_str = "global" if not store_channel else f"pe {store_channel}"
-        self.send_message(feedback, f"✅ Removed {removed} ban(s) {scope_str} for mask: {target}")
+        self.send_message(feedback, "⚠️ Async WHO system missing.")
+
+    # ---------------------------------------------------------------------
+    # LOGICA DE RAMIFICARE
+    # ---------------------------------------------------------------------
+
+    # A) Ștergere după ID
+    if target.lower().startswith("id:"):
+        try:
+            bid = int(target.split(":", 1)[1])
+            self.sql.sqlite_remove_ban_by_id(bid, local=not is_global)
+            self.send_message(feedback, f"✅ Ban ID {bid} removed.")
+        except Exception as e:
+            self.send_message(feedback, f"❌ Error removing ID: {e}")
+        return
+
+    # B) Ștergere după Mască / Regex
+    looks_like_mask = any(c in target for c in ('!', '@', '*', '?', ':')) or target.startswith('^')
+
+    if looks_like_mask:
+        try:
+            active_bans = self.sql.sqlite_get_active_bans_for_channel(self.botId, channel)
+        except Exception as e:
+            self.send_message(feedback, f"SQL Error: {e}")
+            return
+
+        to_remove = []
+        for row in active_bans:
+            scope = row[0]
+            bid = row[1]
+            bmask = row[6]
+            if bmask == target:
+                to_remove.append((bid, bmask, scope))
+
+        _perform_db_removal(to_remove)
+        return
+
+    # C) Ștergere după Nick (Async WHO)
+
+    def on_who_result(info):
+        # Fallback cache
+        if not info:
+            if hasattr(self, "channel_details"):
+                for row in self.channel_details:
+                    if len(row) > 3 and (row[1] or "").lower() == target.lower():
+                        info = {
+                            'nick': row[1], 'ident': row[2], 'host': row[3],
+                            'realname': row[5] if len(row) > 5 else ""
+                        }
+                        break
+
+        if not info:
+            self.send_message(feedback,
+                              f"❌ Could not resolve address for '{target}' (User offline?). Try unbanning by mask.")
+            return
+
+        u_ident = info.get("ident", "*")
+        u_host = info.get("host", "*")
+        u_real = info.get("realname", "")
+
+        # Construim string-ul complet care va apărea în mesajul de succes
+        # Exemplu: dannt!~login@193.231.148.210
+        resolved_full_host = f"{target}!{u_ident}@{u_host}"
+
+        try:
+            active_bans = self.sql.sqlite_get_active_bans_for_channel(self.botId, channel)
+        except Exception as e:
+            self.send_message(feedback, f"SQL Error: {e}")
+            return
+
+        to_remove = []
+        for row in active_bans:
+            scope = row[0]
+            bid = row[1]
+            bmask = row[6]
+            btype = row[7]
+
+            if _ban_matches_user(bmask, btype, target, u_ident, u_host, u_real):
+                to_remove.append((bid, bmask, scope))
+
+        # Pasăm hostul complet către funcția de ștergere
+        _perform_db_removal(to_remove, resolved_target_name=resolved_full_host)
+
+    def on_who_error(failure):
+        self.send_message(feedback, f"⚠️ Error resolving nick: {failure.getErrorMessage()}")
+
+    # Lansare Async
+    if hasattr(self, "get_user_info_async"):
+        d = self.get_user_info_async(target, timeout=5.0)
+        d.addCallback(on_who_result)
+        d.addErrback(on_who_error)
+    else:
+        self.send_message(feedback, "⚠️ Async WHO system missing.")
+
 
 def cmd_ban(self, channel, feedback, nick, host, msg):
     """
     Usage:
       !ban <nick|mask|regex> [-regex] [-sticky] [-d 1h30m] [-reason "text"] [-g]
     """
-
+    import re
+    import shlex
+    import time
     from twisted.internet import reactor
 
-    # --- small helpers (local) ---
+    # --- 1. Small Helpers ---
+
     def _parse_duration_to_seconds(spec: str):
         if not spec:
             return None
         total = 0
         for qty, unit in re.findall(r"(\d+)\s*(h|m|s)", spec.lower()):
             n = int(qty)
-            if unit == "h": total += n*3600
-            elif unit == "m": total += n*60
-            else: total += n
+            if unit == "h":
+                total += n * 3600
+            elif unit == "m":
+                total += n * 60
+            else:
+                total += n
         return total or None
 
     def _safe_compile_regex(pattern: str):
@@ -304,10 +357,8 @@ def cmd_ban(self, channel, feedback, nick, host, msg):
         return re.compile(r'^' + esc + r'$')
 
     def _normalize_banmask_for_mode(ban_mask: str, member: dict | None):
-        # strip :realname if present; MODE +b nu acceptă realname
         if ':' in ban_mask and ('!' in ban_mask or '@' in ban_mask):
             return ban_mask.split(':', 1)[0]
-        # dacă e regex, încearcă fallback la *!ident@host (dacă avem member)
         looks_regex = ban_mask.startswith('^') or ban_mask.endswith('$')
         if looks_regex and member:
             ident = member.get('ident') or '*'
@@ -318,39 +369,31 @@ def cmd_ban(self, channel, feedback, nick, host, msg):
     def _iter_channel_members(chan: str):
         rows = getattr(self, 'channel_details', [])
         for row in rows:
-            if not isinstance(row, (list, tuple)):
+            if not isinstance(row, (list, tuple)) or not row:
                 continue
-            if not row or row[0] != chan:
+            if row[0] != chan:
                 continue
-
+            # row structure: [channel, nick, ident, host, privileges, realname, userId]
             n = row[1] if len(row) > 1 else None
             ident = row[2] if len(row) > 2 else None
             h = row[3] if len(row) > 3 else None
             _priv = row[4] if len(row) > 4 else None
             real = row[5] if len(row) > 5 else None
             uid = row[6] if len(row) > 6 else None
-
             yield {
-                'nick': n,
-                'ident': ident,
-                'host': h,
-                'realname': real,
-                'userId': uid,
-                'priv': _priv
+                'nick': n, 'ident': ident, 'host': h,
+                'realname': real, 'userId': uid, 'priv': _priv
             }
 
-    # --- access check by command id (33 = ban) ---
+    # --- 2. Permission Check ---
     if not self.check_command_access(channel, nick, host, '33', feedback):
         return
 
     if not msg:
-        self.send_message(
-            feedback,
-            "Usage: !ban <nick|mask|regex> [-regex] [-sticky] [-d 1h30m] [-reason \"text\"] [-g]"
-        )
+        self.send_message(feedback, "Usage: !ban <nick|mask|regex> [-regex] [-sticky] [-d 1h] [-reason \"text\"] [-g]")
         return
 
-    # tokenize (acceptă ghilimele la -reason)
+    # --- 3. Argument Parsing ---
     try:
         tokens = shlex.split(msg)
     except Exception:
@@ -359,7 +402,6 @@ def cmd_ban(self, channel, feedback, nick, host, msg):
     target = tokens[0]
     opts = tokens[1:]
 
-    # parse flags
     duration = None
     sticky = False
     reason = None
@@ -371,67 +413,39 @@ def cmd_ban(self, channel, feedback, nick, host, msg):
     duration_spec = None
 
     def _is_new_option(tok: str) -> bool:
-        if not tok.startswith('-'):
-            return False
+        if not tok.startswith('-'): return False
         tl = tok.lower()
-        if tl in ('-g', '--global', '-sticky', '--sticky', '-regex', '--regex', '-reason'):
-            return True
-        if tl.startswith('-d') or tl.startswith('-t'):
-            return True
-        if tl.startswith('-reason='):
-            return True
-        return False
+        return tl in ('-g', '--global', '-sticky', '--sticky', '-regex', '--regex', '-reason') or \
+            tl.startswith('-d') or tl.startswith('-t') or tl.startswith('-reason=')
 
     while i < len(opts):
         t = opts[i]
         tl = t.lower()
-
         if tl in ('-g', '--global'):
             is_global = True
-            i += 1
-            continue
-
-        if tl in ('-sticky', '--sticky'):
+        elif tl in ('-sticky', '--sticky'):
             sticky = True
-            i += 1
-            continue
-
-        if tl in ('-regex', '--regex'):
+        elif tl in ('-regex', '--regex'):
             is_regex = True
-            i += 1
-            continue
-
-        if tl.startswith('-d') or tl.startswith('-t'):
-            if len(t) > 2 and t[2] in ('=',):
+        elif tl.startswith('-d') or tl.startswith('-t'):
+            if len(t) > 2 and t[2] == '=':
                 duration_spec = t[3:]
-                i += 1
-                continue
             elif len(t) > 2:
                 duration_spec = t[2:]
+            elif i + 1 < len(opts):
+                duration_spec = opts[i + 1];
                 i += 1
-                continue
-            if i + 1 < len(opts):
-                duration_spec = opts[i + 1]
-                i += 2
-            else:
-                i += 1
-            continue
-
-        if tl.startswith('-reason='):
+        elif tl.startswith('-reason='):
             reason_tokens = [t.split('=', 1)[1]]
-            i += 1
-            continue
-
-        if tl == '-reason':
+        elif tl == '-reason':
             i += 1
             while i < len(opts):
                 nt = opts[i]
                 if _is_new_option(nt):
+                    i -= 1;
                     break
                 reason_tokens.append(nt)
                 i += 1
-            continue
-
         i += 1
 
     if duration_spec:
@@ -444,17 +458,16 @@ def cmd_ban(self, channel, feedback, nick, host, msg):
     if is_global:
         userId = self.get_logged_in_user_by_host(self.get_hostname(nick, host, 0))
         if not userId:
-            self.send_message(feedback, "❌ You must be authenticated to set global bans.")
+            self.send_message(feedback, "❌ Authenticate first for global bans.")
             return
-
         issuer_flag = self.sql.sqlite_get_max_flag(self.botId, userId)
         if issuer_flag not in ("N", "n", "m"):
-            self.send_message(feedback, "❌ You are not allowed to set global bans.")
+            self.send_message(feedback, "❌ Insufficient access for global bans.")
             return
 
-    # --- helper care finalizează ban-ul cu o mască DEJA calculată ---
+    # --- 4. Finalize Ban Logic ---
     def _finalize_ban(ban_mask: str, is_regex_local: bool):
-        # setter_userId corect, pe host normalizat
+        # Caută setter ID
         try:
             host_mask = self.get_hostname(nick, host, 0)
             info = self.sql.sqlite_handle(self.botId, nick, host_mask)
@@ -462,6 +475,7 @@ def cmd_ban(self, channel, feedback, nick, host, msg):
         except Exception:
             setter_userId = None
 
+        # Adaugă în DB
         created_id = self.sql.sqlite_add_ban(
             botId=self.botId,
             channel=store_channel,
@@ -474,15 +488,18 @@ def cmd_ban(self, channel, feedback, nick, host, msg):
             duration_seconds=duration
         )
 
+        # Aplică pe canal
         applied = 0
         queued = 0
 
         if channel and channel.startswith('#'):
+            # Compilează matcher
+            rx = None
             if is_regex_local:
                 try:
                     rx = _safe_compile_regex(ban_mask)
-                except ValueError:
-                    rx = None
+                except:
+                    pass
             else:
                 rx = _mask_to_re(ban_mask)
 
@@ -490,145 +507,105 @@ def cmd_ban(self, channel, feedback, nick, host, msg):
             if hasattr(self, "_has_channel_op"):
                 try:
                     has_op = self._has_channel_op(channel)
-                except Exception:
+                except:
                     has_op = True
 
+            # Iterează userii și aplică
             for m in _iter_channel_members(channel):
                 m_full = f"{m['nick']}!{m['ident']}@{m['host']}"
                 m_full_real = f"{m_full}:{m['realname']}" if m.get('realname') else m_full
 
                 matched = False
-                if is_regex_local and rx:
-                    if rx.search(m_full_real) or rx.search(m_full):
-                        matched = True
-                elif not is_regex_local and rx:
-                    if rx.match(m_full_real) or rx.match(m_full):
+                if rx:
+                    if rx.search(m_full_real) or rx.search(m_full) if is_regex_local else (
+                            rx.match(m_full_real) or rx.match(m_full)):
                         matched = True
 
-                if not matched:
-                    continue
+                if not matched: continue
 
+                # MODE +b
                 mode_mask = _normalize_banmask_for_mode(ban_mask, m)
-
                 if has_op:
-                    try:
-                        self.sendLine(f"MODE {channel} +b {mode_mask}")
-                        self.sendLine(
-                            f"KICK {channel} {m['nick']} :Banned ({reason or 'no reason'})"
-                        )
-                        applied += 1
-                    except Exception:
-                        pass
+                    self.sendLine(f"MODE {channel} +b {mode_mask}")
+                    self.sendLine(f"KICK {channel} {m['nick']} :Banned ({reason or 'no reason'})")
+                    applied += 1
                 else:
                     if hasattr(self, "_queue_pending_ban_check"):
-                        self._queue_pending_ban_check(
-                            channel,
-                            m['nick'],
-                            m.get('ident') or '*',
-                            m.get('host') or '*',
-                            m.get('realname'),
-                        )
+                        self._queue_pending_ban_check(channel, m['nick'], m.get('ident') or '*', m.get('host') or '*',
+                                                      m.get('realname'))
                         queued += 1
 
+        # Mark applied
         try:
             table = 'BANS_LOCAL' if store_channel else 'BANS_GLOBAL'
             self.sql.sqlite_mark_ban_applied(table, created_id)
-        except Exception:
+        except:
             pass
 
+        # Register timer
         if hasattr(self, 'ban_expiration_manager') and duration:
             expires_at = int(time.time()) + duration
             self.ban_expiration_manager.on_ban_added(created_id, expires_at)
 
-        scope = "global" if store_channel is None else f"on {store_channel}"
-        duration_str = f", expires in {duration}s" if duration else ", permanent"
+        # Raportează
+        scope = "global" if not store_channel else f"on {store_channel}"
+        dur_str = f", expires in {duration}s" if duration else ", permanent"
+        extra = f" (applied: {applied}, queued: {queued})" if (applied or queued) else ""
 
-        extra = ""
-        if queued and not applied:
-            extra = f" (no op: queued {queued} user(s) for when I get +o)"
-        elif queued:
-            extra = f" (applied to {applied}, queued {queued} more without op)"
-        else:
-            extra = f", applied to {applied} users immediately."
+        self.send_message(feedback, f"✅ Ban stored (id={created_id}) {scope}{dur_str}{extra}")
 
-        self.send_message(
-            feedback,
-            f"✅ Ban stored (id={created_id}) {scope}{duration_str}{extra}"
-        )
+    # --- 5. Execution Branches ---
 
-    # --- branch 1: regex (nu avem nevoie de WHO) ---
+    # A) Regex
     if is_regex:
         try:
-            _ = _safe_compile_regex(target)
+            _safe_compile_regex(target)
         except ValueError as e:
             self.send_message(feedback, f"Invalid regex: {e}")
             return
-        # direct finalize
         _finalize_ban(target, True)
         return
 
-    # --- branch 2: mask (are deja !/@/*/?/:) → NU facem WHO, nu atingem masca ---
+    # B) Mask (*!@)
     looks_like_mask = any(c in target for c in ('!', '@', ':', '*', '?'))
     if looks_like_mask:
         _finalize_ban(target, False)
         return
 
-    # --- branch 3: NICK simplu → WHO într-un ThreadWorker, ca la unban ---
-    def _worker_ban_by_nick():
-        ban_mask_local = None
-        try:
-            info = None
-            if hasattr(self, "who_sync_nick"):
-                try:
-                    info = self.who_sync_nick(target, timeout=5.0)
-                except Exception:
-                    info = None
+    # C) Nick (Async WHO)
+    # NU folosi ThreadWorker aici, e deja async!
 
-            if not info:
-                reactor.callFromThread(
-                    self.send_message,
-                    feedback,
-                    f"❌ {target} is not online (WHO returned no results)."
-                )
-                return
-
-            ident = info.get("ident") or info.get("user") or "*"
-            hostpart = info.get("host") or "*"
-
-            ident = ident or "*"
-            hostpart = hostpart or "*"
-            raw_host = f"{ident}@{hostpart}"
-
-            # ÎMBUNĂTĂȚIRE: Includem realname dacă e disponibil
-            base_mask = self.get_hostname(target, raw_host, 0)
-            realname = info.get("realname") or ""
-
-            if realname and realname.strip():
-                # Creează mască cu realname pentru matching mai precis
-                ban_mask_local = f"{base_mask}:{realname}"
-            else:
-                ban_mask_local = base_mask
-
-        except Exception as e:
-            reactor.callFromThread(
-                self.send_message,
-                feedback,
-                f"⚠️ WHO failed for {target}: {e}"
-            )
+    def on_who_result(info):
+        if not info:
+            self.send_message(feedback, f"❌ {target} is not online (WHO returned no results).")
             return
 
-        if not ban_mask_local:
-            reactor.callFromThread(
-                self.send_message,
-                feedback,
-                f"⚠️ Unable to build ban mask for {target}."
-            )
-            return
+        ident = info.get("ident") or "*"
+        hostpart = info.get("host") or "*"
+        realname = info.get("realname") or ""
 
-        # aplicăm ban-ul pe reactor (safe)
-        reactor.callFromThread(_finalize_ban, ban_mask_local, False)
+        # Construim masca
+        raw_host = f"{ident}@{hostpart}"
+        base_mask = self.get_hostname(target, raw_host, 0)  # Folosește logica ta de netmask
 
-    ThreadWorker(target=_worker_ban_by_nick, name=f"ban_{target}").start()
+        if realname.strip():
+            ban_mask_local = f"{base_mask}:{realname}"
+        else:
+            ban_mask_local = base_mask
+
+        _finalize_ban(ban_mask_local, False)
+
+    def on_who_error(failure):
+        self.send_message(feedback, f"⚠️ WHO failed for {target}: {failure.getErrorMessage()}")
+
+    # Lansăm cererea (Non-blocking)
+    if hasattr(self, "get_user_info_async"):
+        d = self.get_user_info_async(target, timeout=5.0)
+        d.addCallback(on_who_result)
+        d.addErrback(on_who_error)
+    else:
+        self.send_message(feedback, "⚠️ Async WHO not available.")
+
 
 def cmd_help(self, channel, feedback, nick, host, msg):
     msg = (msg or "").strip()
@@ -870,17 +847,95 @@ def cmd_status(self, channel, feedback, nick, host, msg):
     except Exception:
         botlink_line = None
 
+    # ─────────── Cache Statistics (NEW!) ───────────
+    cache_lines = []
+    try:
+        # Helper function to format cache stats
+        def format_cache_stats(cache_name, cache_obj, display_name):
+            """Format statistics for a single cache"""
+            if not cache_obj:
+                return None
+
+            # Get stats object (might be nested in _cache for wrapper classes)
+            stats = None
+            if hasattr(cache_obj, 'stats'):
+                stats = cache_obj.stats
+            elif hasattr(cache_obj, '_cache') and hasattr(cache_obj._cache, 'stats'):
+                stats = cache_obj._cache.stats
+
+            if not stats:
+                return None
+
+            # Get maxlen (might be in wrapper or nested cache)
+            maxlen = getattr(cache_obj, 'maxlen', None)
+            if maxlen is None and hasattr(cache_obj, '_cache'):
+                maxlen = getattr(cache_obj._cache, 'maxlen', '?')
+            if maxlen is None:
+                maxlen = '?'
+
+            # Calculate percentages
+            size = stats.size
+            fill_pct = (size / maxlen * 100) if isinstance(maxlen, int) and maxlen > 0 else 0
+            hit_rate = stats.hit_rate * 100 if stats.hit_rate else 0
+
+            # Choose emoji based on fill percentage
+            if fill_pct < 50:
+                fill_emoji = "🟢"
+            elif fill_pct < 80:
+                fill_emoji = "🟡"
+            else:
+                fill_emoji = "🔴"
+
+            # Format the line
+            line = (
+                f"  {fill_emoji} {display_name}: "
+                f"{size}/{maxlen} ({fill_pct:.0f}%) | "
+                f"Hit: {hit_rate:.1f}% | "
+                f"Evict: {stats.evictions} | "
+                f"Exp: {stats.expired}"
+            )
+            return line
+
+        # Check each cache
+        caches_to_check = [
+            ('user_cache', self.user_cache, 'User Cache'),
+            ('logged_in_users', self.logged_in_users, 'Logged Users'),
+        ]
+
+        # Also check for optimized caches if they exist
+        if hasattr(self, 'known_users_cache'):
+            caches_to_check.append(('known_users_cache', self.known_users_cache, 'Known Users'))
+
+        if hasattr(self, 'host_to_nicks') and hasattr(self.host_to_nicks, 'stats'):
+            caches_to_check.append(('host_to_nicks', self.host_to_nicks, 'Host→Nick'))
+
+        for cache_name, cache_obj, display_name in caches_to_check:
+            line = format_cache_stats(cache_name, cache_obj, display_name)
+            if line:
+                cache_lines.append(line)
+
+    except Exception as e:
+        # If cache stats fail, don't break the whole status command
+        cache_lines.append(f"  ⚠️ Cache stats error: {str(e)}")
+
     # ─────────── Compose mesaj ───────────
     msg_lines = [
         f"📊 *Advanced Status Report*",
         f"🔢 Threads ({num_threads}): {threads_line}",
-        f"👥 Logged Users: {users_logged} | 🧠 Known: {known_users} | 🔐 Cache: {user_cache}",
-        f"🔁 Rejoin Queue: {pending_rejoins} | 📺 Channel Details: {channel_info}",
+        f"📌 Rejoin Queue: {pending_rejoins} | 📺 Channel Details: {channel_info}",
         system_line,
     ]
 
     if botlink_line:
         msg_lines.append(botlink_line)
+
+    # Add cache statistics section (replaces old simple counters)
+    if cache_lines:
+        msg_lines.append("📊 Cache Statistics:")
+        msg_lines.extend(cache_lines)
+    else:
+        # Fallback to simple counters if cache stats not available
+        msg_lines.append(f"👥 Logged Users: {users_logged} | 🧠 Known: {known_users} | 📝 User Cache: {user_cache}")
 
     msg_lines.extend([
         f"💻 System: {system} {release} | CPU: {cpu_model}",
@@ -2265,5 +2320,251 @@ def cmd_asn(self, channel, feedback, nick, host, msg):
     deferToThread(work_short).addCallback(lambda lines: [self.send_message(feedback, l) for l in lines])
 
 
+def cmd_user(self, channel, feedback, nick, host, msg):
+    """
+    !user <subcommand> <args>
 
+    Subcommands:
+      profile <nick> [days]    - Complete user profile
+      sentiment <nick> [days]  - Sentiment analysis
+      partners <nick> [days]   - Conversation partners
+      active <nick> [days]     - Peak activity times
+      compare <nick1> <nick2> [days] - Compare two users
+      link <nick>              - Get analytics page link
+
+    Example: !user profile alice 30
+    """
+
+    args = msg.strip().split() if msg else []
+
+    if not args:
+        self.send_message(feedback, f"{nick}: Usage: !user <subcommand> <args>")
+        self.send_message(feedback, f"  Subcommands: profile, sentiment, partners, active, compare, link")
+        return
+
+    subcommand = args[0].lower()
+    subargs = ' '.join(args[1:]) if len(args) > 1 else ''
+
+    if subcommand == 'profile':
+        _cmd_user_profile(self, channel, feedback, nick, host, subargs)
+
+    elif subcommand == 'sentiment':
+        _cmd_user_sentiment(self, channel, feedback, nick, host, subargs)
+
+    elif subcommand == 'partners':
+        _cmd_user_partners(self, channel, feedback, nick, host, subargs)
+
+    elif subcommand == 'active':
+        _cmd_user_active(self, channel, feedback, nick, host, subargs)
+
+    elif subcommand == 'compare':
+        _cmd_user_compare(self, channel, feedback, nick, host, subargs)
+
+    elif subcommand == 'link':
+        _cmd_user_link(self, channel, feedback, nick, host, subargs)
+
+    else:
+        self.send_message(feedback, f"{nick}: Unknown subcommand '{subcommand}'")
+        self.send_message(feedback, f"  Available: profile, sentiment, partners, active, compare, link")
+
+
+def _cmd_user_profile(self, channel, feedback, nick, host, args):
+    """!user profile <nick> [days]"""
+
+    parts = args.split() if args else []
+
+    if not parts:
+        self.send_message(feedback, f"{nick}: Usage: !user profile <nick> [days=30]")
+        return
+
+    target_nick = parts[0]
+    days = int(parts[1]) if len(parts) > 1 else 30
+
+    try:
+        analytics = get_analytics(self.sql)
+        profile = analytics.get_user_profile(self.botId, channel, target_nick, days)
+
+        if 'error' in profile:
+            self.send_message(feedback, f"{nick}: No data found for {target_nick}")
+            return
+
+        # Send summary
+        self.send_message(feedback, f"{nick}: Profile for {target_nick} (last {days} days):")
+        self.send_message(feedback, f"  📊 Activity: {profile['activity']['total_messages']} msgs, "
+                                    f"{profile['activity']['avg_words_per_message']:.1f} avg words/msg")
+        self.send_message(feedback, f"  💭 Sentiment: {profile['sentiment']['overall_sentiment'].upper()} "
+                                    f"(score: {profile['sentiment']['average_score']:.2f})")
+
+        if profile['patterns']['peak_hours']:
+            peak = profile['patterns']['peak_hours'][0]
+            self.send_message(feedback, f"  ⏰ Most active: {peak['time_label']} "
+                                        f"({peak['percentage']:.1f}% of activity)")
+
+        if profile['social']['top_conversation_partners']:
+            top = profile['social']['top_conversation_partners'][0]
+            self.send_message(feedback, f"  👥 Top partner: {top['partner']} "
+                                        f"({top['total_interactions']} interactions)")
+
+    except Exception as e:
+        self.send_message(feedback, f"{nick}: Error: {e}")
+
+
+def _cmd_user_sentiment(self, channel, feedback, nick, host, args):
+    """!user sentiment <nick> [days]"""
+
+    parts = args.split() if args else []
+
+    if not parts:
+        self.send_message(feedback, f"{nick}: Usage: !user sentiment <nick> [days=30]")
+        return
+
+    target_nick = parts[0]
+    days = int(parts[1]) if len(parts) > 1 else 30
+
+    try:
+        analytics = get_analytics(self.sql)
+        result = analytics.get_user_sentiment(self.botId, channel, target_nick, days)
+
+        self.send_message(feedback, f"{nick}: Sentiment for {target_nick} (last {days} days):")
+        self.send_message(feedback, f"  Overall: {result['overall_sentiment'].upper()} "
+                                    f"(score: {result['average_score']:.2f})")
+        self.send_message(feedback, f"  Breakdown: {result['positive_messages']} positive, "
+                                    f"{result['negative_messages']} negative, "
+                                    f"{result['neutral_messages']} neutral")
+        self.send_message(feedback, f"  Total analyzed: {result['total_analyzed']} messages")
+
+    except Exception as e:
+        self.send_message(feedback, f"{nick}: Error: {e}")
+
+
+def _cmd_user_partners(self, channel, feedback, nick, host, args):
+    """!user partners <nick> [days]"""
+
+    parts = args.split() if args else []
+
+    if not parts:
+        self.send_message(feedback, f"{nick}: Usage: !user partners <nick> [days=30]")
+        return
+
+    target_nick = parts[0]
+    days = int(parts[1]) if len(parts) > 1 else 30
+
+    try:
+        analytics = get_analytics(self.sql)
+        partners = analytics.get_conversation_partners(self.botId, channel, target_nick, days, limit=5)
+
+        if not partners:
+            self.send_message(feedback, f"{nick}: No conversation data found for {target_nick}")
+            return
+
+        self.send_message(feedback, f"{nick}: Top conversation partners for {target_nick}:")
+
+        for i, p in enumerate(partners[:5], 1):
+            self.send_message(feedback, f"  {i}. {p['partner']}: {p['total_interactions']} interactions "
+                                        f"({p['replies_to']}→, {p['replies_from']}←)")
+
+    except Exception as e:
+        self.send_message(feedback, f"{nick}: Error: {e}")
+
+
+def _cmd_user_active(self, channel, feedback, nick, host, args):
+    """!user active <nick> [days]"""
+
+    parts = args.split() if args else []
+
+    if not parts:
+        self.send_message(feedback, f"{nick}: Usage: !user active <nick> [days=30]")
+        return
+
+    target_nick = parts[0]
+    days = int(parts[1]) if len(parts) > 1 else 30
+
+    try:
+        analytics = get_analytics(self.sql)
+
+        # Get peak hours
+        hours = analytics.get_user_peak_hours(self.botId, channel, target_nick, days)
+
+        if not hours:
+            self.send_message(feedback, f"{nick}: No activity data found for {target_nick}")
+            return
+
+        self.send_message(feedback, f"{nick}: Peak hours for {target_nick} (last {days} days):")
+
+        for i, h in enumerate(hours[:5], 1):
+            self.send_message(feedback, f"  {i}. {h['time_label']}: {h['messages']} msgs "
+                                        f"({h['percentage']:.1f}% of activity)")
+
+        # Get peak days
+        days_data = analytics.get_user_peak_days(self.botId, channel, target_nick, max(4, days // 7))
+
+        if days_data:
+            top_day = days_data[0]
+            self.send_message(feedback, f"  Most active day: {top_day['day_name']} "
+                                        f"({top_day['percentage']:.1f}%)")
+
+    except Exception as e:
+        self.send_message(feedback, f"{nick}: Error: {e}")
+
+
+def _cmd_user_compare(self, channel, feedback, nick, host, args):
+    """!user compare <nick1> <nick2> [days]"""
+
+    parts = args.split() if args else []
+
+    if len(parts) < 2:
+        self.send_message(feedback, f"{nick}: Usage: !user compare <nick1> <nick2> [days=30]")
+        return
+
+    nick1 = parts[0]
+    nick2 = parts[1]
+    days = int(parts[2]) if len(parts) > 2 else 30
+
+    try:
+        analytics = get_analytics(self.sql)
+        result = analytics.compare_users(self.botId, channel, nick1, nick2, days)
+
+        if 'error' in result:
+            self.send_message(feedback, f"{nick}: {result['error']}")
+            return
+
+        self.send_message(feedback, f"{nick}: Comparing {nick1} vs {nick2} (last {days} days):")
+
+        # Messages
+        m = result['metrics']['total_messages']
+        self.send_message(feedback, f"  📊 Messages: {nick1}={m[nick1]}, {nick2}={m[nick2]} "
+                                    f"(winner: {m['winner']})")
+
+        # Words
+        w = result['metrics']['avg_words']
+        self.send_message(feedback, f"  📝 Avg words: {nick1}={w[nick1]:.1f}, {nick2}={w[nick2]:.1f} "
+                                    f"(winner: {w['winner']})")
+
+        # Sentiment
+        s = result['metrics']['sentiment']
+        self.send_message(feedback, f"  💭 Sentiment: {nick1}={s[nick1]}, {nick2}={s[nick2]}")
+
+    except Exception as e:
+        self.send_message(feedback, f"{nick}: Error: {e}")
+
+
+def _cmd_user_link(self, channel, feedback, nick, host, args):
+    """!user link <nick>"""
+
+    target_nick = args.strip() if args else ''
+
+    if not target_nick:
+        self.send_message(feedback, f"{nick}: Usage: !user link <nick>")
+        return
+
+    # Get API port from config
+    try:
+        from modules.stats.stats_config import get_stats_config
+        config = get_stats_config()
+        port = config.get_api_port()
+    except:
+        port = 8000
+
+    url = f"http://localhost:{port}/user/{channel}/{target_nick}"
+    self.send_message(feedback, f"{nick}: User analytics for {target_nick}: {url}")
 

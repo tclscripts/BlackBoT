@@ -303,19 +303,22 @@ class SmartTTLCache(OptimizedTTLCache):
     """
     Enhanced TTL Cache with additional smart features:
     - Adaptive TTL based on access patterns
-    - Automatic background cleanup (optional)
+    - Automatic background cleanup (optional) - IMPROVED
     - Cache warming strategies
     - Advanced eviction policies
     """
 
     def __init__(self, maxlen: int = 2000, ttl: float = 6 * 3600,
                  adaptive_ttl: bool = True, background_cleanup: bool = False,
+                 cleanup_interval: float = 300.0,
                  **kwargs):
         super().__init__(maxlen, ttl, **kwargs)
         self.adaptive_ttl = adaptive_ttl
         self._access_patterns: Dict[Any, list] = {}  # Track access times
         self._background_cleanup = background_cleanup
-        self._cleanup_timer = None
+        self._cleanup_interval = cleanup_interval
+        self._cleanup_thread = None
+        self._cleanup_stop_event = None
 
         if background_cleanup:
             self._start_background_cleanup()
@@ -376,29 +379,73 @@ class SmartTTLCache(OptimizedTTLCache):
 
         return adaptive_ttl
 
-    def _start_background_cleanup(self, interval: float = 300) -> None:
-        """Start background cleanup timer (every 5 minutes by default)"""
+    def _start_background_cleanup(self) -> None:
+        """
+        IMPROVED: Start background cleanup with proper thread management.
+        Uses a single long-running thread instead of creating new timers.
+        """
+        if self._cleanup_thread is not None:
+            # Already running
+            return
 
-        def cleanup_task():
-            try:
-                self.cleanup()
-            except:
-                pass  # Ignore cleanup errors
+        self._cleanup_stop_event = threading.Event()
 
-            # Reschedule
-            self._cleanup_timer = threading.Timer(interval, cleanup_task)
-            self._cleanup_timer.daemon = True
-            self._cleanup_timer.start()
+        def cleanup_loop():
+            """Long-running cleanup loop with interruptible wait"""
+            from core.log import get_logger
+            logger = get_logger("cache_cleanup")
 
-        self._cleanup_timer = threading.Timer(interval, cleanup_task)
-        self._cleanup_timer.daemon = True
-        self._cleanup_timer.start()
+            logger.debug(f"Background cleanup started for cache (interval={self._cleanup_interval}s)")
+
+            while not self._cleanup_stop_event.is_set():
+                try:
+                    # Perform cleanup
+                    stats = self.cleanup()
+                    if stats['expired_removed'] > 0 or stats['lru_evicted'] > 0:
+                        logger.debug(
+                            f"Cache cleanup: removed {stats['expired_removed']} expired, "
+                            f"evicted {stats['lru_evicted']} LRU entries, "
+                            f"current size: {stats['current_size']}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Cache cleanup failed: {e}", exc_info=True)
+
+                # Interruptible wait - can be stopped immediately
+                if self._cleanup_stop_event.wait(timeout=self._cleanup_interval):
+                    # Stop was requested
+                    break
+
+            logger.debug("Background cleanup stopped")
+
+        self._cleanup_thread = threading.Thread(
+            target=cleanup_loop,
+            name=f"cache_cleanup_{id(self)}",
+            daemon=True
+        )
+        self._cleanup_thread.start()
 
     def stop_background_cleanup(self) -> None:
-        """Stop background cleanup timer"""
-        if self._cleanup_timer:
-            self._cleanup_timer.cancel()
-            self._cleanup_timer = None
+        """IMPROVED: Stop background cleanup thread gracefully"""
+        if self._cleanup_stop_event is not None:
+            self._cleanup_stop_event.set()
+
+        if self._cleanup_thread is not None:
+            try:
+                # Wait for thread to finish (max 2 seconds)
+                self._cleanup_thread.join(timeout=2.0)
+                if self._cleanup_thread.is_alive():
+                    from core.log import get_logger
+                    logger = get_logger("cache_cleanup")
+                    logger.warning(
+                        f"Cleanup thread {self._cleanup_thread.name} did not stop within 2 seconds"
+                    )
+            except Exception as e:
+                from core.log import get_logger
+                logger = get_logger("cache_cleanup")
+                logger.error(f"Error stopping cleanup thread: {e}")
+            finally:
+                self._cleanup_thread = None
+                self._cleanup_stop_event = None
 
     def warm_cache(self, warming_function: Callable[[Any], Any],
                    keys: list, ttl: Optional[float] = None) -> int:
@@ -417,7 +464,7 @@ class SmartTTLCache(OptimizedTTLCache):
         return warmed_count
 
     def __del__(self):
-        """Cleanup background timer on destruction"""
+        """Cleanup background thread on destruction"""
         try:
             self.stop_background_cleanup()
         except:

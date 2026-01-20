@@ -1,4 +1,3 @@
-
 import datetime
 import sys
 import ipaddress
@@ -11,7 +10,9 @@ import time
 import platform
 import threading
 from functools import partial
+from queue import Queue
 from pathlib import Path
+from modules.stats import init_stats_system, shutdown_stats_system
 
 # ============================================================================
 # AUTO-DETECT AND ACTIVATE VIRTUAL ENVIRONMENT
@@ -88,11 +89,11 @@ def _setup_virtual_environment():
 # Call the setup function BEFORE importing Twisted and other dependencies
 _setup_virtual_environment()
 
-
 from twisted.internet import protocol, ssl, reactor
 from twisted.words.protocols import irc
 from collections import defaultdict, deque
 from twisted.internet.threads import deferToThread
+
 sys.path.append(os.path.join(os.path.dirname(__file__), 'core'))
 import core.environment_config as env
 from core import commands
@@ -104,6 +105,12 @@ from core import seen
 from core.threading_utils import get_event
 from core.dcc import DCCManager
 from core.optimized_cache import SmartTTLCache
+from core.cache_manager import (
+    LoggedUsersCache,
+    KnownUsersCache,
+    HostToNicksCache,
+    get_cache_statistics_report
+)
 from core.monitor_client import ensure_enrollment, send_heartbeat, send_monitor_offline
 from core.log import get_logger, install_excepthook, log_session_banner
 from core.ban_expiration_manager import BanExpirationManager
@@ -123,12 +130,12 @@ logger = get_logger("blackbot")
 install_excepthook(logger)
 
 _WORKER_POLICY = {
-    "monitor":       {"supervise": True, "provide_signals": True,  "heartbeat_timeout": 60.0},
-    "logged_users":  {"supervise": True, "provide_signals": True,  "heartbeat_timeout": 90.0},
-    "uptime":        {"supervise": True, "provide_signals": True,  "heartbeat_timeout": 120.0},
+    "monitor": {"supervise": True, "provide_signals": True, "heartbeat_timeout": 60.0},
+    "logged_users": {"supervise": True, "provide_signals": True, "heartbeat_timeout": 90.0},
+    "uptime": {"supervise": True, "provide_signals": True, "heartbeat_timeout": 120.0},
     "manual_update": {"supervise": False, "provide_signals": False},
     "botlink": {"supervise": True, "provide_signals": True, "heartbeat_timeout": 90.0},
-    "*":             {"supervise": True, "provide_signals": False}
+    "*": {"supervise": True, "provide_signals": False}
 }
 
 session_details = {
@@ -166,6 +173,8 @@ class Bot(irc.IRCClient):
         self.logger.info("Logger initialized for BlackBoT instance.")
         self._init_worker_registry()
         self.monitorId = None
+        self.shutting_down = False
+        self._shutdown_lock = threading.RLock()
         self.version = _load_version()
         self.monitor_enabled = None
         self.hmac_secret = None
@@ -193,12 +202,15 @@ class Bot(irc.IRCClient):
         self.notOnChannels = []
         # rejoin channel list
         self.rejoin_pending = {}
+        # MODIFICARE: Lista de canale unde avem ban temporar
+        self.banned_channels = set()
+
         self.pending_join_requests = {}
         # logged users
-        self.logged_in_users = {}
+        self.logged_in_users = LoggedUsersCache(maxlen=5000, ttl=48*3600)
         self.clean_logged_users(silent=True)
         self.thread_check_logged_users_started = False
-        self.known_users = set()  # (channel, nick)
+        self.known_users = KnownUsersCache(maxlen=10000, ttl=12*3600)  # (channel, nick)
         self.who_lock = threading.RLock()
         self.who_queue = {}
         self.who_replies = {}
@@ -218,7 +230,7 @@ class Bot(irc.IRCClient):
         self.newbot = self.sql.sqlite3_bot_birth(self.username, self.nickname, self.realname,
                                                  self.away)
         self.botId = self.newbot[1]
-        self.host_to_nicks = defaultdict(set)
+        self.host_to_nicks = HostToNicksCache(maxlen=3000, ttl=24*3600)
         self._start_worker(
             "uptime",
             target=lambda se, b: self.sql.sqlite_update_uptime(self, self.botId, se, b),
@@ -228,7 +240,7 @@ class Bot(irc.IRCClient):
         if self.sql.sqlite_has_active_ignores(self.botId):
             logger.info("⏳ Active ignores found. Starting cleanup thread...")
             self._start_worker("ignore_cleanup", target=self.cleanup_ignores)
-        self.message_queue = queue.Queue()
+        self.message_queue = Queue(maxsize=1000)
         self.message_delay = s.message_delay
         self._start_worker("message_sender", target=self._message_worker, global_singleton=False)
         self.thread_check_for_changed_nick = None
@@ -241,7 +253,7 @@ class Bot(irc.IRCClient):
             self.unbind_hello = False
         reactor.addSystemEventTrigger(
             'before', 'shutdown',
-            partial(send_monitor_offline, self.monitorId, self.hmac_secret)
+            lambda: self.graceful_shutdown("Reactor shutdown")
         )
         self.dcc = DCCManager(
             self,
@@ -251,6 +263,13 @@ class Bot(irc.IRCClient):
             idle_timeout=getattr(s, "dcc_idle_timeout", 600),
             allow_unauthed=bool(getattr(s, "dcc_allow_unauthed", False)),
         )
+
+        try:
+            from core.log import register_dcc_callback
+            register_dcc_callback(self.dcc.broadcast_log_to_humans)
+            logger.info("✅ DCC log streaming registered")
+        except Exception as e:
+            logger.error(f"Failed to register DCC log callback: {e}")
 
         # Initialize ban expiration manager
         self.ban_expiration_manager = BanExpirationManager(self)
@@ -273,6 +292,186 @@ class Bot(irc.IRCClient):
                 pass
             finally:
                 self._timers.discard(dc)
+
+    def graceful_shutdown(self, reason="Shutdown"):
+        """Graceful shutdown - run only once"""
+
+        # CRITICAL: Check dacă deja rulează
+        with self._shutdown_lock:
+            if self.shutting_down:
+                return
+
+            self.shutting_down = True
+
+        if hasattr(self, 'factory'):
+            self.factory.shutting_down = True
+            if hasattr(self.factory, 'stopTrying'):
+                try:
+                    self.factory.stopTrying()
+                except Exception as e:
+                    logger.error(f"Error calling stopTrying: {e}")
+        # -----------------------------------------------------------
+
+        logger.info(f"=" * 80)
+        logger.info(f"🛑 GRACEFUL SHUTDOWN INITIATED: {reason}")
+        logger.info(f"=" * 80)
+
+        try:
+            # 1. Send QUIT
+            if self.connected:
+                try:
+                    quit_msg = f"QUIT :{reason}"
+                    try:
+                        self.sendLine(quit_msg)
+                    except TypeError:
+                        self.sendLine(quit_msg.encode('utf-8'))
+
+                    logger.info("📤 Sent QUIT to IRC server")
+                    time.sleep(0.5)
+                except Exception as e:
+                    logger.warning(f"Could not send QUIT: {e}")
+
+            # 2. Oprește heartbeat
+            try:
+                self._stop_heartbeat_loop()
+                logger.info("✅ Heartbeat stopped")
+            except Exception as e:
+                logger.error(f"Error stopping heartbeat: {e}")
+
+            # 3. Oprește Ban Expiration Manager
+            try:
+                if hasattr(self, 'ban_expiration_manager'):
+                    self.ban_expiration_manager.stop()
+            except Exception as e:
+                logger.error(f"Error stopping ban manager: {e}")
+
+            try:
+                if hasattr(self, '_workers'):
+                    worker_count = len(self._workers)
+                    logger.info(f"🔄 Stopping {worker_count} workers...")
+
+                    # Workers care pot fi lenți (ex: requesturi HTTP)
+                    slow_workers = ['known_users', 'auto_update', 'botlink']
+
+                    for name in list(self._workers.keys()):
+                        try:
+                            timeout = 2.0
+                            self._stop_worker(name, join_timeout=timeout)
+                            logger.debug(f"  ✓ Stopped: {name}")
+                        except Exception as e:
+                            logger.warning(f"  ✗ Failed to stop {name}: {e}")
+
+                    logger.info(f"✅ All workers stopped")
+            except Exception as e:
+                logger.error(f"Error stopping workers: {e}")
+
+            # 5. Cancel timers
+            try:
+                self._cancel_all_timers()
+                logger.info("✅ All timers cancelled")
+            except Exception as e:
+                logger.error(f"Error cancelling timers: {e}")
+
+            # 6. Flush message queue
+            try:
+                if hasattr(self, 'message_queue'):
+                    pending = self.message_queue.qsize()
+                    if pending > 0:
+                        timeout = time.time() + 2.0
+                        while not self.message_queue.empty() and time.time() < timeout:
+                            try:
+                                self.message_queue.get_nowait()
+                                self.message_queue.task_done()
+                            except:
+                                break
+            except Exception as e:
+                logger.error(f"Error flushing queue: {e}")
+
+            # 7. Salvează uptime
+            try:
+                if hasattr(self, 'sql') and hasattr(self, 'botId'):
+                    import threading
+                    fake_stop = threading.Event()
+                    fake_stop.set()
+
+                    self.sql.sqlite_update_uptime(
+                        self,
+                        self.botId,
+                        stop_event=fake_stop,
+                        beat=lambda: None
+                    )
+                    logger.info("✅ Uptime saved to database")
+            except Exception as e:
+                logger.error(f"Error saving uptime: {e}")
+
+            # 8. Închide SQL
+            try:
+                if hasattr(self, 'sql'):
+                    self.sql.close_connection()
+                    logger.info("✅ SQL connection closed")
+            except Exception as e:
+                logger.error(f"Error closing SQL: {e}")
+
+            # 9. Notify monitor
+            try:
+                if hasattr(self, 'monitorId') and hasattr(self, 'hmac_secret'):
+                    from core.monitor_client import send_monitor_offline
+                    send_monitor_offline(self.monitorId, self.hmac_secret)
+            except Exception as e:
+                logger.error(f"Error notifying monitor: {e}")
+
+            for handler in logging.getLogger().handlers:
+                try:
+                    handler.flush()
+                except:
+                    pass
+
+            # B) Trimitem MANUAL mesajul final direct prin socket (bypass logging lent)
+            final_msg = (
+                f"\n{'=' * 60}\n"
+                f"✅ GRACEFUL SHUTDOWN COMPLETE\n"
+                f"{'=' * 60}\n"
+            )
+
+            has_active_dcc = False
+            if hasattr(self, 'dcc') and self.dcc:
+                for nick, session in list(self.dcc.sessions.items()):
+                    if session and session.transport:
+                        try:
+                            # Scriem direct bytes pe fir
+                            session.transport.write((final_msg + "\r\n").encode('utf-8'))
+                            has_active_dcc = True
+                        except:
+                            pass
+            if has_active_dcc:
+                time.sleep(4.0)
+            else:
+                time.sleep(0.5)
+
+            try:
+                if hasattr(self, 'dcc_log_handler') and self.dcc_log_handler:
+                    self.dcc_log_handler.close()
+                    logger.info("✅ DCC log handler closed")
+            except Exception as e:
+                logger.error(f"Error closing DCC log handler: {e}")
+
+            # 12. Închide efectiv conexiunile DCC (ULTIMUL PAS)
+            try:
+                if hasattr(self, 'dcc'):
+                    logger.info("✅ DCC closed (all sessions)")
+                    self.dcc.shutdown(force=True)
+            except Exception as e:
+                logger.error(f"Error stopping DCC: {e}")
+
+            # Final flush
+            for handler in logging.getLogger().handlers:
+                try:
+                    handler.flush()
+                except:
+                    pass
+
+        except Exception as e:
+            logger.error(f"❌ Error during graceful shutdown: {e}", exc_info=True)
 
     def _start_worker(self, name: str, target, daemon: bool = True, global_singleton: bool = True):
         import inspect
@@ -399,36 +598,86 @@ class Bot(irc.IRCClient):
         return payload
 
     def _start_heartbeat_loop(self):
-        if getattr(self, "_hb_thread", None):
-            return
+        """Start heartbeat loop with proper worker management"""
+        # Oprește worker-ul existent dacă există
+        if hasattr(self, '_hb_worker_name'):
+            try:
+                self._stop_worker(self._hb_worker_name, join_timeout=2.0)
+            except Exception as e:
+                logger.debug(f"Error stopping old heartbeat worker: {e}")
 
-        self._hb_stop = threading.Event()
+        # Nume unic pentru worker (bazat pe id-ul instanței)
+        self._hb_worker_name = f"heartbeat_{id(self)}"
 
-        def _loop():
+        def _loop(stop_event, beat):
+            """
+            Heartbeat loop cu support pentru stop_event și beat.
+            CRITICAL: Verifică stop_event ÎNAINTE de connected!
+            """
             interval = 30
             backoff = interval
-            while getattr(self, "monitor_enabled", False) and self.connected and not self._hb_stop.is_set():
+
+            logger.debug(f"Heartbeat loop started for {self._hb_worker_name}")
+
+            # Loop principal - VERIFICĂ stop_event PRIMUL
+            while not stop_event.is_set():
+                # Apoi verifică dacă suntem conectați
+                if not getattr(self, "monitor_enabled", False) or not self.connected:
+                    logger.debug("Heartbeat stopping: not connected or monitoring disabled")
+                    break
+
                 try:
                     payload = self._collect_metrics()
                     ok = send_heartbeat(self.monitorId, self.hmac_secret, payload)
+
                     if ok:
                         backoff = interval
+                        beat()  # Signal că suntem alive
                     else:
                         backoff = min(backoff * 2, 300)
-                        logger.debug(f"Heartbeat loop backoff (next={backoff}s)")
-                except Exception:
+                        logger.debug(f"Heartbeat failed, backoff={backoff}s")
+                except Exception as e:
+                    logger.error(f"Heartbeat error: {e}", exc_info=True)
                     backoff = min(backoff * 2, 300)
-                self._hb_stop.wait(backoff)
 
-        self._start_worker("heartbeat", target=_loop, global_singleton=False)
+                # Interruptible sleep - permite oprire imediată
+                if stop_event.wait(timeout=backoff):
+                    logger.debug("Heartbeat stopping: stop signal received")
+                    break
+
+            logger.debug("Heartbeat loop finished")
+
+        # Pornește worker-ul cu supervizare
+        self._start_worker(
+            self._hb_worker_name,
+            target=_loop,
+            global_singleton=False  # NU singleton - per-instance
+        )
+
+        logger.debug(f"Heartbeat worker started: {self._hb_worker_name}")
 
     def _stop_heartbeat_loop(self):
+        """Stop heartbeat loop and worker properly - prevents restart loops"""
+        if not hasattr(self, '_hb_worker_name'):
+            logger.debug("No heartbeat worker to stop")
+            return
+
+        worker_name = self._hb_worker_name
+
         try:
-            if getattr(self, "_hb_stop", None):
-                self._hb_stop.set()
-        except Exception:
-            pass
-        logger.info("🛑 Heartbeat loop stopped.")
+            logger.debug(f"Stopping heartbeat worker: {worker_name}")
+
+            # CRITICAL: Oprește worker-ul (și implicit setează stop_event)
+            self._stop_worker(worker_name, join_timeout=3.0)
+
+            # Șterge numele pentru a preveni opriri duplicate
+            if hasattr(self, '_hb_worker_name'):
+                delattr(self, '_hb_worker_name')
+
+            logger.info("🛑 Heartbeat loop stopped completely")
+
+        except Exception as e:
+            logger.error(f"Error stopping heartbeat: {e}", exc_info=True)
 
     def _get_ident_host_from_channel(self, channel: str, nick: str):
         for c, n, ident, host, *_ in self.channel_details:
@@ -453,27 +702,97 @@ class Bot(irc.IRCClient):
     def join_channel(self, name: str):
         if not name:
             return
+
+        # MODIFICARE: Verificăm dacă canalul este banat temporar
+        if name in self.banned_channels:
+            logger.info(f"⛔ Skipping join for {name} (temporarily ignored due to BAN/KEY/INVITE error).")
+            return
+
         self.pending_join_requests[name.lower()] = name
         self.join(name)
 
-    def userQuit(self, user, message):
-        # user este de forma "nick!ident@host"
-        nick = user.split('!')[0]
-
-        if self.channel_details:
+    def _clean_user_memory(self, nick, channel=None, is_quit=False):
+        """
+        Curăță urmele unui user din memorie.
+        :param nick: Nickname-ul userului
+        :param channel: Canalul specific (pentru PART/KICK). None pentru QUIT (toate).
+        :param is_quit: Dacă e True, șterge userul de peste tot (QUIT).
+        """
+        # 1. Curățare CHANNEL_DETAILS (Lista mare)
+        # Folosim o listă nouă prin filtrare (mai rapid și sigur decât remove în buclă)
+        if is_quit:
+            # Scoatem userul de peste tot
             self.channel_details = [
-                arr for arr in self.channel_details if arr[1].lower() != nick.lower()
+                row for row in self.channel_details
+                if len(row) > 1 and row[1] != nick
+            ]
+        elif channel:
+            # Scoatem userul doar de pe canalul specificat
+            self.channel_details = [
+                row for row in self.channel_details
+                if not (len(row) > 1 and row[0] == channel and row[1] == nick)
             ]
 
-        # logout logic bazat pe nick (și host normalizat)
-        self.logoutOnQuit(nick)
+        # 2. Curățare KNOWN_USERS (Set)
+        if is_quit:
+            self.known_users = {
+                (c, n) for (c, n) in self.known_users if n != nick
+            }
+        elif channel:
+            self.known_users.discard((channel, nick))
 
-        ident, host = self._get_any_ident_host(nick)
-        seen.on_quit(self.sql, self.botId, nick, message, ident=ident, host=host)
-        self._remove_from_pending(nick)
+        # 3. Curățare HOST_TO_NICKS (Leak-ul principal)
+        # Trebuie să căutăm în tot dicționarul unde apare nick-ul
+        if hasattr(self, 'host_to_nicks'):
+            empty_hosts = []
+            for host, nicks in self.host_to_nicks.items():
+                if nick in nicks:
+                    nicks.discard(nick)
+                    if not nicks:  # Dacă lista e goală, marcăm hostul pentru ștergere
+                        empty_hosts.append(host)
 
+            # Ștergem cheile goale ca să nu ocupăm memorie degeaba
+            for host in empty_hosts:
+                del self.host_to_nicks[host]
+
+        # 4. Curățare LOGGED_IN_USERS (Sesiuni agățate)
+        # Dacă userul dă QUIT, îl scoatem din sesiunea activă
+        if is_quit and hasattr(self, 'logged_in_users'):
+            for uid, data in list(self.logged_in_users.items()):
+                # Curățăm nick-ul din setul de nicks al userului
+                if "nicks" in data and nick in data["nicks"]:
+                    data["nicks"].discard(nick)
+
+                # Dacă nick-ul principal a ieșit și nu mai are alte nick-uri, delogăm?
+                # Aici e discutabil. De obicei păstrăm sesiunea un timp,
+                # dar curățarea setului 'nicks' e obligatorie.
+                if data.get("nick") == nick:
+                    # Putem lăsa sesiunea activă (ghost session) sau o resetăm
+                    pass
+
+        # 5. Curățare User Cache (ID-uri)
+        # Cache-ul e (nick, host) -> id.
+        # La QUIT, userul pleacă, deci putem șterge intrările cu nick-ul lui.
+        if is_quit:
+            keys_to_del = [k for k in self.user_cache.keys() if k[0] == nick]
+            for k in keys_to_del:
+                del self.user_cache[k]
+
+    def userQuit(self, user, quitMessage):
+        nick = user.split('!')[0]
+        logger.info(f"⬅️ QUIT: {nick} ({quitMessage})")
+
+        # Logica SEEN
+        if hasattr(seen, 'on_quit'):
+            seen.on_quit(self.sql, self.botId, user)
+
+        # 🧹 CURĂȚENIE GENERALĂ
+        self._clean_user_memory(nick, is_quit=True)
 
     def signedOn(self):
+        # start stats system
+        init_stats_system(self)
+
         logger.info("Signed on to the server")
         # load commands
         self.load_commands()
@@ -510,50 +829,52 @@ class Bot(irc.IRCClient):
         super().lineReceived(line)
 
     def connectionLost(self, reason):
+        # shutdown stats system
+        shutdown_stats_system()
 
-        try:
-            if hasattr(self, "dcc"):
-                self.dcc.shutdown()
-        except Exception:
-            pass
+        """Handle connection loss with proper cleanup order"""
+        logger.info(f"🔌 Disconnected from IRC: {reason}.")
 
-        try:
-            send_monitor_offline(self.monitorId, self.hmac_secret)
-        except Exception:
-            pass
-        super().connectionLost(reason)
+        if getattr(self, '_shutting_down', False):
+            return
 
+        # CRITICAL: Oprește heartbeat ÎNAINTE de a seta connected=False
+        # Altfel, loop-ul se termină dar supervizorul încearcă restart
+        self._stop_heartbeat_loop()
+
+        # APOI setăm connected=False
+        v.connected = False
         self.connected = False
 
-        self._stop_heartbeat_loop()
-        self._stop_worker("message_sender")
-        self._stop_worker("recover_nick")
-        self._stop_worker("logged_users")
-
-        # Stop ban expiration manager
+        # Oprește ban expiration manager
         if hasattr(self, 'ban_expiration_manager'):
             try:
                 self.ban_expiration_manager.stop()
                 logger.info("🛑 Ban expiration manager stopped")
             except Exception as e:
-                logger.error(f"Error stopping ban expiration manager: {e}")
+                logger.error(f"Error stopping ban manager: {e}")
 
-        self.monitor_enabled = False
-        try:
-            self._cancel_all_timers()
-        except Exception:
-            pass
+        # Oprește DCC (dar păstrează sesiunile pentru jump/reload)
+        if hasattr(self, 'dcc'):
+            self.dcc.shutdown()
+
+        # Oprește workers specifici acestei conexiuni
+        per_connection_workers = ['message_sender', 'logged_users']
+
+        for worker_name in per_connection_workers:
+            if hasattr(self, '_workers') and worker_name in self._workers:
+                try:
+                    self._stop_worker(worker_name, join_timeout=2.0)
+                    logger.debug(f"Stopped per-connection worker: {worker_name}")
+                except Exception as e:
+                    logger.error(f"Error stopping worker {worker_name}: {e}")
+
+        # Cancel timers
+        self._cancel_all_timers()
 
         logger.info(
-            f"🔌 Disconnected from IRC: {reason}. Heartbeat & per-connection workers stopped; global workers kept alive.")
-
-        # Stop ban expiration manager
-        if hasattr(self, 'ban_expiration_manager'):
-            try:
-                self.ban_expiration_manager.stop()
-                logger.info("🛑 Ban expiration manager stopped")
-            except Exception as e:
-                logger.error(f"Error stopping ban expiration manager: {e}")
+            "Heartbeat & per-connection workers stopped; global workers kept alive."
+        )
 
     # --- Conexiune socket Twisted ---
     def connectionMade(self):
@@ -658,100 +979,316 @@ class Bot(irc.IRCClient):
             threading.Thread(target=delayed_ban_check, daemon=True).start()
 
     def userJoined(self, user, channel):
-        # DEBUG de bază
-        logger.info(f"[DEBUG] userJoined CALLED for {user} on {channel}")
-
         # Parse user info
         nick = user.split('!')[0] if '!' in user else user
         ident = user.split('!')[1].split('@')[0] if '!' in user and '@' in user else ''
         host = user.split('@')[1] if '@' in user else ''
 
-        # seen
-        seen.on_join(self.sql, self.botId, channel, user, ident, host)
+        if hasattr(seen, 'on_join'):
+            seen.on_join(self.sql, self.botId, channel, user, ident, host)
 
-        # Cere WHO pentru realname / refresh cache
-        try:
-            self.sendLine(f"WHO {nick}")
-        except Exception:
-            pass
+        if nick == self.nickname:
+            return
 
-        # Dacă nu avem managerul de banuri, ne oprim aici
         if not hasattr(self, 'ban_expiration_manager'):
             return
 
-        # ➜ 1) Băgăm ÎNTOTDEAUNA userul în pending (indiferent dacă avem +o sau nu)
+        # ---------------------------------------------------------------------
+        # ETAPA 1: Verificare Rapidă (Fast Check)
+        # Verificăm ban-urile bazate pe Host/Ident IMEDIAT, fără să așteptăm WHO.
+        # ---------------------------------------------------------------------
         try:
             self._queue_pending_ban_check(
                 channel,
                 nick,
                 ident or "*",
                 host or "*",
-                None,  # realname va fi completat (dacă e cazul) din WHO
+                None,  # Realname necunoscut momentan
             )
-            logger.info(f"[DEBUG] Queued {nick} for pending ban-check on {channel}")
-        except Exception as e:
-            logger.error(f"[DEBUG] FAILED to queue pending ban-check for {nick} on {channel}: {e}")
-            return
 
-        # ➜ 2) Dacă avem deja +o pe canal, procesăm coada ACUM
-        try:
+            # Dacă avem +o, procesăm acum (prindem banurile simple rapid)
             if self._has_channel_op(channel):
-                logger.info(f"[DEBUG] Bot HAS +o on {channel}, processing pending bans...")
                 self._process_pending_ban_checks_for_channel(channel)
-            else:
-                logger.info(f"[DEBUG] Bot NO +o on {channel}, will process pending when we get op.")
         except Exception as e:
-            logger.error(f"[DEBUG] Error while processing pending bans for {channel}: {e}")
+            logger.error(f"[DEBUG] Error in immediate ban check: {e}")
+
+        if hasattr(self, "get_user_info_async"):
+
+            def on_who_result(info):
+                if not info:
+                    return  # Userul a ieșit sau eroare
+
+                realname = info.get('realname')
+                u_ident = info.get('ident') or ident
+                u_host = info.get('host') or host
+
+                # Dacă am primit date noi (în special Realname), verificăm din nou!
+                try:
+
+                    # Actualizăm datele din coadă (sau adăugăm din nou cu date complete)
+                    self._queue_pending_ban_check(
+                        channel,
+                        nick,
+                        u_ident,
+                        u_host,
+                        realname  # Aici e cheia: acum avem realname-ul
+                    )
+
+                    # Dacă avem +o, procesăm din nou pentru a aplica ban-urile complexe
+                    if self._has_channel_op(channel):
+                        self._process_pending_ban_checks_for_channel(channel)
+
+                except Exception as e:
+                    logger.error(f"[DEBUG] Error in post-WHO ban check: {e}")
+
+            def on_who_err(fail):
+                pass
+
+            # Lansăm cererea
+            d = self.get_user_info_async(nick, timeout=10)
+            d.addCallback(on_who_result)
+            d.addErrback(on_who_err)
 
     def userLeft(self, user, channel):
-        nick = user.split('!')[0]
-        ident, host = self._get_ident_host_from_channel(channel, nick)
-        seen.on_part(self.sql, self.botId, channel, nick, ident=ident, host=host, reason="left")
-        self._remove_user_from_channel(channel, nick)
-        self._remove_from_pending(nick, channel)
+        """
+        Apelată când un user (sau botul) părăsește un canal (PART).
+        """
+        # Parsare nick
+        nick = user.split('!')[0] if '!' in user else user
 
-    def userKicked(self, kicked, channel, kicker, message):
+        logger.info(f"⬅️ PART (Left): {nick} from {channel}")
 
-        ident, host = self._get_ident_host_from_channel(channel, kicked)
-        seen.on_kick(self.sql, self.botId, channel, kicked, kicker, message, ident=ident, host=host)
-        self._remove_user_from_channel(channel, kicked)
-        self._remove_from_pending(kicked, channel)
+        if nick == self.nickname:
+            logger.warning(f"📉 I left {channel}. Wiping all data for this channel.")
+
+            # 1. Curățăm lista detaliată (channel_details)
+            # Păstrăm doar rândurile care NU sunt despre acest canal
+            self.channel_details = [
+                row for row in self.channel_details
+                if len(row) > 0 and row[0] != channel
+            ]
+
+            # 2. Curățăm setul rapid (known_users)
+            self.known_users = {
+                (c, n) for (c, n) in self.known_users
+                if c != channel
+            }
+
+            # 3. Curățăm cozile de verificare ban-uri (nu mai avem ce verifica acolo)
+            if hasattr(self, 'pending_ban_checks'):
+                self.pending_ban_checks.pop(channel, None)
+
+        else:
+            # Folosim helper-ul de curățenie definit anterior
+            # Dacă nu l-ai definit încă, asigură-te că ai funcția _clean_user_memory în clasă!
+            if hasattr(self, '_clean_user_memory'):
+                self._clean_user_memory(nick, channel=channel, is_quit=False)
+            else:
+                # Fallback manual dacă nu ai pus încă helper-ul:
+
+                # Scoatere din channel_details
+                self.channel_details = [
+                    row for row in self.channel_details
+                    if not (len(row) > 1 and row[0] == channel and row[1] == nick)
+                ]
+
+                # Scoatere din known_users
+                self.known_users.discard((channel, nick))
+
+                # Curățare host_to_nicks (Important pentru memory leak!)
+                if hasattr(self, 'host_to_nicks'):
+                    # Trebuie să găsim hostul userului ca să îl curățăm corect
+                    # Aceasta e o operațiune mai grea fără helper, dar necesară
+                    empty_hosts = []
+                    for h, nicks in self.host_to_nicks.items():
+                        if nick in nicks:
+                            nicks.discard(nick)
+                            if not nicks:
+                                empty_hosts.append(h)
+                    for h in empty_hosts:
+                        del self.host_to_nicks[h]
+
+    def userKicked(self, kickee, channel, kicker, message):
+        """
+        Apelată când ALT user primește kick.
+        """
+        # Ignorăm dacă cumva Twisted apelează asta pentru bot (deși are kickedFrom)
+        if kickee == self.nickname:
+            return
+
+        # 1. Recuperăm info pentru SEEN înainte să ștergem userul
+        # (Trebuie să știm ident/host ca să le notăm în baza de date)
+        ident = ""
+        host = ""
+
+        # Căutăm în cache-ul local (channel_details)
+        # Format row: [channel, nick, ident, host, ...]
+        for row in self.channel_details:
+            if len(row) > 3 and row[0] == channel and row[1] == kickee:
+                ident = row[2]
+                host = row[3]
+                break
+
+        # 2. Notăm evenimentul în baza de date (SEEN)
+        if hasattr(seen, 'on_kick'):
+            try:
+                seen.on_kick(self.sql, self.botId, channel, kickee, kicker, message, ident=ident, host=host)
+            except Exception as e:
+                logger.error(f"Seen kick error: {e}")
+
+        # 3. Log
+        logger.info(f"👢 KICK: {kickee} was kicked from {channel} by {kicker} ({message})")
+
+        # 4. Curățăm memoria userului (folosind helper-ul robust)
+        # Asta șterge din channel_details, known_users, host_to_nicks, etc.
+        if hasattr(self, '_clean_user_memory'):
+            self._clean_user_memory(kickee, channel=channel, is_quit=False)
+        else:
+            # Fallback (dacă nu ai pus încă helper-ul)
+            self.channel_details = [r for r in self.channel_details if not (r[0] == channel and r[1] == kickee)]
+            self.known_users.discard((channel, kickee))
+
+            # Curățăm și din pending bans (dacă era în coadă să fie verificat)
+            if hasattr(self, 'pending_ban_checks'):
+                chan_pending = self.pending_ban_checks.get(channel)
+                if chan_pending:
+                    chan_pending.pop((kickee or "").lower(), None)
 
     def kickedFrom(self, channel, kicker, message):
+        """
+        Apelată când BOTUL primește kick.
+        Trebuie să șteargă TOATE datele despre acel canal și să încerce rejoin.
+        """
+        logger.warning(f"⚠️ I was kicked from {channel} by {kicker} ({message})")
 
-        if channel.lower() in (c.lower() for c in self.notOnChannels):
-            self.notOnChannels.append(channel)
-        self.channel_details = [arr for arr in self.channel_details if channel in arr]
-        self.addChannelToPendingList(channel, f"kicked by {kicker} with reason: {message}")
-        self._schedule_rejoin(channel)
+        # 1. Curățăm TOATĂ memoria legată de acest canal
+        # (Nu putem păstra useri pentru un canal pe care nu mai suntem)
+
+        # Păstrăm doar rândurile care NU sunt despre acest canal
+        # (Logica ta veche `if channel in arr` păstra DOAR canalul, ceea ce e greșit,
+        # noi vrem să ștergem canalul curent și să păstrăm restul)
+        self.channel_details = [
+            row for row in self.channel_details
+            if len(row) > 0 and row[0] != channel
+        ]
+
+        # Curățăm known_users
+        self.known_users = {
+            (c, n) for (c, n) in self.known_users
+            if c != channel
+        }
+
+        # Curățăm pending bans pentru acest canal
+        if hasattr(self, 'pending_ban_checks'):
+            self.pending_ban_checks.pop(channel, None)
+
+        # 2. Logică de Rejoin (Auto-Rejoin)
+
+        # Adăugăm la lista de canale "problematice" sau de rejoin
+        if hasattr(self, 'addChannelToPendingList'):
+            self.addChannelToPendingList(channel, f"kicked by {kicker} with reason: {message}")
+
+        # Programăm rejoin-ul
+        if hasattr(self, '_schedule_rejoin'):
+            self._schedule_rejoin(channel)
+        else:
+            # Fallback simplu dacă nu ai funcția _schedule_rejoin
+            from twisted.internet import reactor
+            # Încearcă rejoin după 10 secunde
+            reactor.callLater(10.0, self.join, channel)
 
     def userRenamed(self, oldnick, newnick):
         logger.info(f"🔄 Nick change detected: {oldnick} → {newnick}")
-        seen.on_nick_change(self.sql, self.botId, oldnick, newnick)
 
-        for user in self.channel_details:
-            if user[1] == oldnick:
-                user[1] = newnick
+        # 1. ACTUALIZARE SEEN
+        if hasattr(seen, 'on_nick_change'):
+            try:
+                seen.on_nick_change(self.sql, self.botId, oldnick, newnick)
+            except Exception as e:
+                logger.error(f"Seen update failed: {e}")
 
-        updated_known = set()
-        for chan, nick in self.known_users:
-            if nick == oldnick:
-                updated_known.add((chan, newnick))
-            else:
-                updated_known.add((chan, nick))
-        self.known_users = updated_known
+        # ---------------------------------------------------------
+        # 2. CRITIC: Dacă BOTUL și-a schimbat numele
+        # ---------------------------------------------------------
+        if oldnick == self.nickname:
+            self.nickname = newnick
+            # Actualizăm și în factory ca să știe la reconectare
+            if hasattr(self, 'factory'):
+                self.factory.nickname = newnick
+            logger.info(f"🤖 MY NICKNAME UPDATED: {self.nickname}")
 
-        updated_cache = {}
-        for (nick, host), userId in self.user_cache.items():
-            if nick == oldnick:
-                updated_cache[(newnick, host)] = userId
-            else:
-                updated_cache[(nick, host)] = userId
-        self.user_cache = updated_cache
+        # 3. Actualizare CHANNEL_DETAILS (Lista principală de useri pe canale)
+        # Iterăm și actualizăm peste tot unde apare vechiul nick
+        # Colectăm canalele unde e userul pentru a verifica banurile ulterior
+        affected_channels = []
 
-        for data in self.logged_in_users.values():
-            if isinstance(data, dict) and data.get("nick") == oldnick:
+        for row in self.channel_details:
+            # row structure: [channel, nick, ident, host, ...]
+            if len(row) > 1 and row[1] == oldnick:
+                row[1] = newnick
+                affected_channels.append((row[0], row[2], row[3]))  # channel, ident, host
+
+        # 4. Actualizare KNOWN_USERS (Set-ul de acces rapid)
+        # Reconstruim setul pentru a elimina oldnick și a adăuga newnick
+        if (any(k[1] == oldnick for k in self.known_users)):
+            new_known = set()
+            for chan, nick in self.known_users:
+                if nick == oldnick:
+                    new_known.add((chan, newnick))
+                else:
+                    new_known.add((chan, nick))
+            self.known_users = new_known
+
+        # 5. Actualizare CACHE (User ID cache)
+        # Trebuie să mutăm userId-ul de pe cheia veche pe cheia nouă
+        keys_to_update = []
+        for key, uid in self.user_cache.items():
+            # key este tuple (nick, host)
+            if key[0] == oldnick:
+                keys_to_update.append((key, uid))
+
+        for old_key, uid in keys_to_update:
+            old_n, host = old_key
+            # Ștergem intrarea veche
+            del self.user_cache[old_key]
+            # Adăugăm intrarea nouă
+            self.user_cache[(newnick, host)] = uid
+
+        # 6. Actualizare LOGGED_IN_USERS
+        # Aici e important să actualizăm și setul de 'nicks' dacă userul are mai multe
+        for uid, data in self.logged_in_users.items():
+            # A) Dacă nick-ul principal era cel vechi
+            if data.get("nick") == oldnick:
                 data["nick"] = newnick
+
+            # B) Actualizăm setul de nick-uri asociate sesiunii
+            if "nicks" in data and isinstance(data["nicks"], set):
+                if oldnick in data["nicks"]:
+                    data["nicks"].remove(oldnick)
+                    data["nicks"].add(newnick)
+
+        # ---------------------------------------------------------
+        # 7. SECURITATE: Verificăm BAN-uri pentru noul Nickname
+        # ---------------------------------------------------------
+        # Dacă nu e botul cel care și-a schimbat numele, verificăm dacă noul nume e interzis
+        if newnick != self.nickname and hasattr(self, 'ban_expiration_manager'):
+            for channel, ident, host in affected_channels:
+                try:
+                    # Adăugăm în coada de verificare (Fast Check)
+                    self._queue_pending_ban_check(
+                        channel,
+                        newnick,
+                        ident or "*",
+                        host or "*",
+                        None  # Realname nu se schimbă la rename, dar nu-l știm exact aici rapid
+                    )
+
+                    # Dacă avem OP, procesăm imediat
+                    if self._has_channel_op(channel):
+                        self._process_pending_ban_checks_for_channel(channel)
+
+                except Exception as e:
+                    logger.error(f"Failed to re-check bans for {newnick}: {e}")
 
     # add channel to pending list
     def addChannelToPendingList(self, channel, reason):
@@ -825,53 +1362,60 @@ class Bot(irc.IRCClient):
                 self.thread_ignore_cleanup.start()
                 self.ignore_cleanup_started = True
 
-    def who_sync_nick(self, nick: str, timeout: float = 5.0):
+    # -------------------------------------------------------------------------
+    # NON-BLOCKING WHO SYSTEM
+    # -------------------------------------------------------------------------
+
+    def get_user_info_async(self, nick, timeout=5):
         """
-        Perform a synchronous WHO <nick> and return:
-        {
-          'nick': ...,
-          'ident': ...,
-          'host': ...,
-          'realname': ...
-        }
-        or None on failure.
-
-        IMPORTANT:
-        - Această funcție BLOCHEAZĂ (folosește time.sleep),
-          deci NU trebuie apelată din thread-ul reactorului.
-        - Folosește self.irc_sendline(...) ca să trimită WHO în mod thread-safe.
+        Returnează un Deferred care va conține info despre user (nick, ident, host, realname).
+        NU blochează botul.
         """
+        # 1. Verificăm mai întâi cache-ul local (channel_details) pentru viteză
+        # Dacă userul e deja cunoscut, returnăm direct rezultatul (fără thread)
+        from twisted.internet.defer import succeed
 
-        nick_l = nick.lower()
+        # Căutăm în listele de canale
+        for row in self.channel_details:
+            # row format: [channel, nick, ident, host, role, realname]
+            if len(row) > 5 and row[1].lower() == nick.lower():
+                # Am găsit userul în cache!
+                user_data = {
+                    'nick': row[1],
+                    'ident': row[2],
+                    'host': row[3],
+                    'realname': row[5]
+                }
+                return succeed(user_data)
 
-        # Lock WHO system
-        try:
-            self.who_lock.acquire()
-        except Exception:
-            return None
+        # 2. Dacă nu e în cache, pornim un thread pentru WHO
+        return deferToThread(self._thread_wait_for_who, nick, timeout)
 
-        try:
-            # clear old WHO replies
-            self.who_replies.pop(nick_l, None)
+    def _thread_wait_for_who(self, nick, timeout):
+        """
+        Această funcție rulează într-un thread separat.
+        Aici avem voie să folosim time.sleep!
+        """
+        import time
 
-            # register waiter
-            self.who_queue[nick_l] = True
+        # Curățăm variabila temporară unde stocăm rezultatul (trebuie definită în __init__ sau gestionată aici)
+        self._temp_who_result = None
 
-            # send WHO command in a thread-safe way (pe reactor)
-            self.sendLine(f"WHO {nick}")
+        # Trimitem comanda WHO în thread-ul principal (thread-safe)
+        reactor.callFromThread(self.sendLine, f"WHO {nick}")
 
-            # wait for reply filled by irc_RPL_WHOREPLY
-            t0 = time.time()
-            while time.time() - t0 < timeout:
-                if nick_l in self.who_replies:
-                    return self.who_replies.pop(nick_l, None)
-                time.sleep(0.05)
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            # Așteptăm ca serverul să răspundă și parserul să populeze _temp_who_result
+            # (Trebuie să modifici irc_RPL_WHOREPLY să pună datele aici)
 
-            return None  # timeout
-        finally:
-            # cleanup
-            self.who_queue.pop(nick_l, None)
-            self.who_lock.release()
+            if hasattr(self, '_temp_who_result') and self._temp_who_result:
+                if self._temp_who_result['nick'].lower() == nick.lower():
+                    return self._temp_who_result
+
+            time.sleep(0.1)  # Aici e OK să dormim, suntem în thread secundar
+
+        return None  # Timeout
 
     def whois_sync(self, nick, timeout=5):
         """
@@ -1112,34 +1656,72 @@ class Bot(irc.IRCClient):
                         if hasattr(self, "logger"):
                             self.logger.error(f"modeChanged/_on_self_op_mode error on {channel}: {e}")
 
-
     def irc_ERR_BANNEDFROMCHAN(self, prefix, params):
-        logger.info(f"Error: Banned from channel {params[1]}")
-        if params[1].lower() in (c.lower() for c in self.notOnChannels):
-            self.notOnChannels.append(params[1])
-            self.addChannelToPendingList(params[1], f"banned on {params[1]}")
-        self._schedule_rejoin(params[1])
+        channel = params[1]
+
+        # Verificăm dacă avem deja un retry programat pentru acest canal
+        # (Ca să evităm spamul de timer-e dacă serverul trimite eroarea de 2 ori rapid)
+        if not hasattr(self, "_ban_retry_active"):
+            self._ban_retry_active = set()
+
+        if channel in self._ban_retry_active:
+            return
+
+        logger.warning(f"⛔ BANNED from {channel}. Will retry joining in 60 seconds...")
+
+        # 1. Oprim rejoin-ul rapid standard (cel de câteva secunde) ca să nu facem flood
+        if hasattr(self, 'rejoin_pending') and channel in self.rejoin_pending:
+            del self.rejoin_pending[channel]
+
+        # 2. Ne asigurăm că NU e în lista de canale ignorate (banned_channels)
+        # Dacă e acolo, botul ar putea refuza să dea join intern.
+        if hasattr(self, 'banned_channels'):
+            self.banned_channels.discard(channel)
+
+        # 3. Marcăm faptul că așteptăm minutul (ca să nu intrăm iar în if-ul de sus)
+        self._ban_retry_active.add(channel)
+
+        # 4. Definim funcția care va rula peste 1 minut
+        def _retry_join_task():
+            # Scoatem marcajul, ca să putem procesa o nouă eroare dacă join-ul eșuează iar
+            self._ban_retry_active.discard(channel)
+
+            logger.info(f"🔄 Retrying join on {channel} (Anti-Ban 60s timer)...")
+            self.join(channel)
+
+        # 5. Programăm execuția
+        from twisted.internet import reactor
+        reactor.callLater(60, _retry_join_task)
 
     def irc_ERR_CHANNELISFULL(self, prefix, params):
-        logger.info(f"Error: Channel {params[1]} is full")
-        if params[1].lower() in (c.lower() for c in self.notOnChannels):
-            self.notOnChannels.append(params[1])
-            self.addChannelToPendingList(params[1], f"{params[1]} is full, cannot join")
-        self._schedule_rejoin(params[1])
+        channel = params[1]
+        logger.warning(f"⛔ Channel {channel} is FULL. Pausing auto-join for 5 minutes.")
+        self.banned_channels.add(channel)
+
+        if channel in self.rejoin_pending:
+            del self.rejoin_pending[channel]
+
+        from twisted.internet import reactor
+        reactor.callLater(300, lambda: self.banned_channels.discard(channel))
 
     def irc_ERR_BADCHANNELKEY(self, prefix, params):
-        logger.info(f"Error: Bad channel key for {params[1]}")
-        if params[1].lower() in (c.lower() for c in self.notOnChannels):
-            self.notOnChannels.append(params[1])
-            self.addChannelToPendingList(params[1], f"invalid channel key (+k) for {params[1]}")
-        self._schedule_rejoin(params[1])
+        channel = params[1]
+        logger.error(f"🔑 Bad key for {channel}. Stopping join attempts permanently (until restart).")
+        self.banned_channels.add(channel)
+
+        if channel in self.rejoin_pending:
+            del self.rejoin_pending[channel]
 
     def irc_ERR_INVITEONLYCHAN(self, prefix, params):
-        logger.info(f"Error: Invite-only channel {params[1]}")
-        if params[1].lower() in (c.lower() for c in self.notOnChannels):
-            self.notOnChannels.append(params[1])
-            self.addChannelToPendingList(params[1], f"invite only on {params[1]}")
-        self._schedule_rejoin(params[1])
+        channel = params[1]
+        logger.warning(f"📩 {channel} is INVITE ONLY. Pausing auto-join for 5 minutes.")
+        self.banned_channels.add(channel)
+
+        if channel in self.rejoin_pending:
+            del self.rejoin_pending[channel]
+
+        from twisted.internet import reactor
+        reactor.callLater(300, lambda: self.banned_channels.discard(channel))
 
     def irc_ERR_NOSUCHCHANNEL(self, prefix, params):
         logger.info(f"Error: No such channel {params[1]}")
@@ -1254,23 +1836,30 @@ class Bot(irc.IRCClient):
                     if userId and self.is_logged_in(userId, lhost):
                         self.logged_in_users[userId].setdefault("nicks", set()).add(wnickname)
 
-                # 3) Integrare cu who_sync_nick: dacă cineva așteaptă WHO pentru nick-ul ăsta,
-                #    salvează datele și în self.who_replies ca să deblocheze who_sync_nick().
+                # -----------------------------------------------------------
+                # 3) Integrare cu Async WHO System (MODIFICAT)
+                # -----------------------------------------------------------
                 try:
+                    # A. Salvăm datele în variabila pe care o monitorizează thread-ul nou
+                    # Aceasta permite funcției get_user_info_async să primească răspunsul
+                    self._temp_who_result = {
+                        "nick": wnickname,
+                        "ident": wident,
+                        "host": whost,
+                        "realname": wrealname,
+                        "channel": wchannel,
+                        "status": wstatus,
+                    }
+
+                    # B. Păstrăm logica veche (Legacy) pentru compatibilitate
+                    # Dacă alte module încă folosesc who_queue, să nu le stricăm
                     nick_l = (wnickname or "").lower()
                     if hasattr(self, "who_queue") and hasattr(self, "who_replies"):
                         if nick_l in self.who_queue:
-                            self.who_replies[nick_l] = {
-                                "nick": wnickname,
-                                "ident": wident,
-                                "host": whost,
-                                "realname": wrealname,
-                                "channel": wchannel,
-                                "status": wstatus,
-                            }
+                            self.who_replies[nick_l] = self._temp_who_result
                 except Exception:
-                    # nu vrem să stricăm fluxul principal dacă WHO-sync cache pică
                     pass
+                # -----------------------------------------------------------
 
                 # 4) Integrare cu pending_ban_checks:
                 #    - completăm ident/host/realname din WHO
@@ -1324,7 +1913,7 @@ class Bot(irc.IRCClient):
             self.nick_already_in_use = 1
             self.nickname = s.altnick
             if self.nickname != s.nickname:  # start doar dacă e alt nick
-                self._start_worker("recover_nick", target=self.recover_nickname, global_singleton=False)
+                self._start_worker("recover_nick", target=self._recover_nick_loop, global_singleton=False)
 
     # check if logged
     def is_logged_in(self, userId, host):
@@ -1604,6 +2193,36 @@ class Bot(irc.IRCClient):
                 self.setNick(s.nickname)
             time.sleep(5)
 
+    def _recover_nick_loop(self, stop_event, beat):
+        import time
+        from twisted.internet import reactor
+
+        RETRY_INTERVAL = 30
+        logger.info("🔄 RecoverNick worker started.")
+
+        while not stop_event.is_set():
+            desired_nick = getattr(self.factory, 'nickname', None)
+
+            if not desired_nick or self.nickname == desired_nick:
+                logger.info(f"✅ Nick recovery complete. Current: {self.nickname}")
+                reactor.callFromThread(self._stop_worker, "recover_nick")
+                return  # Ieșim din thread, iar main thread va face curățenia finală
+
+            logger.debug(f"🔄 RecoverNick: Attempting swap {self.nickname} -> {desired_nick}")
+            reactor.callFromThread(self.setNick, desired_nick)
+
+            for _ in range(RETRY_INTERVAL):
+                if stop_event.is_set(): return
+                beat()
+
+                if self.nickname == desired_nick:
+                    # La fel și aici, dacă reușim în timpul pauzei
+                    logger.info(f"✅ Nick recovered during wait. Stopping worker.")
+                    reactor.callFromThread(self._stop_worker, "recover_nick")
+                    return
+
+                time.sleep(1.0)
+
     def check_access(self, channel, userId, flags):
         sql_instance = self.sql
         if sql_instance.sqlite_has_access_flags(self.botId, userId, flags):
@@ -1613,17 +2232,64 @@ class Bot(irc.IRCClient):
         return False
 
     def restart(self, reason="Restarting..."):
-        try:
-            self.sendLine(f"QUIT :{reason}")
-        except Exception:
-            pass
-
-        reactor.callLater(2.0, self._restart_process)
-
-    def _restart_process(self):
+        """Restart the bot gracefully"""
         import os
         import sys
         import subprocess
+        from pathlib import Path
+        from twisted.internet import reactor
+
+        logger.info(f"🔄 RESTART command received: {reason}")
+
+        try:
+            # Send QUIT
+            if self.connected:
+                try:
+                    self.sendLine(f"QUIT :{reason}".encode('utf-8'))
+                    logger.info("📤 Sent QUIT to IRC server")
+                    time.sleep(0.5)
+                except:
+                    pass
+
+            # Cleanup workers (dar NU DCC - îl păstrăm pentru seamless restart)
+            self._stop_heartbeat_loop()
+
+            if hasattr(self, 'ban_expiration_manager'):
+                self.ban_expiration_manager.stop()
+
+            # Oprește doar workers per-connection, NU cei globali
+            per_connection_workers = ['message_sender', 'logged_users']
+            for name in per_connection_workers:
+                if hasattr(self, '_workers') and name in self._workers:
+                    try:
+                        self._stop_worker(name, join_timeout=1.0)
+                    except:
+                        pass
+
+            self._cancel_all_timers()
+
+            # Salvează uptime
+            if hasattr(self, 'sql') and hasattr(self, 'botId'):
+                try:
+                    self.sql.sqlite_update_uptime(self, self.botId, None, None)
+                except:
+                    pass
+
+            logger.info("✅ Cleanup complete, starting new process...")
+
+        except Exception as e:
+            logger.error(f"Error during restart cleanup: {e}")
+
+        # Pornește procesul nou
+        reactor.callLater(2.0, self._restart_process)
+
+    def _restart_process(self):
+        """Actually restart the process"""
+        import os
+        import sys
+        import subprocess
+        import time
+        import logging
         from pathlib import Path
 
         instance = os.getenv("BLACKBOT_INSTANCE_NAME", "main")
@@ -1632,7 +2298,20 @@ class Bot(irc.IRCClient):
         env = os.environ.copy()
         env["BLACKBOT_INSTANCE_NAME"] = instance
 
+        try:
+            from core.deps import ensure_packages
+            required = ["fastapi", "uvicorn", "pydantic"]
+            ok = ensure_packages(required, python_exec=sys.executable, env=env, cwd=str(base_dir))
+            if not ok:
+                logger.error("❌ Dependency installation failed. Restart aborted.")
+                return
+        except Exception as e:
+            logger.warning(f"Deps check failed (continuing): {e}")
+
+        logger.info(f"🚀 Launching new process: {script}")
+
         if os.name == "nt":
+            # Windows
             DETACHED_PROCESS = 0x00000008
             CREATE_NEW_PROCESS_GROUP = 0x00000200
             CREATE_NO_WINDOW = 0x08000000
@@ -1646,40 +2325,81 @@ class Bot(irc.IRCClient):
                 creationflags=creationflags
             )
         else:
+            # Linux/Unix
             subprocess.Popen(
                 [sys.executable, str(script)],
                 cwd=str(base_dir),
-                env=env
+                env=env,
+                start_new_session=True  # Detach from parent
             )
+
+        logger.info("✅ New process launched, exiting old process...")
+
+        # --- FIX: PAUZĂ PENTRU DRAIN DCC ---
+        # Permitem log-ului de mai sus să ajungă la clientul DCC
+
+        # A) Flush la logger-ul Python
+        for handler in logging.getLogger().handlers:
+            try:
+                handler.flush()
+            except:
+                pass
+
+        # B) Trimitem un mesaj manual pe socket pentru confirmare vizuală
+        if hasattr(self, 'dcc') and self.dcc:
+            msg = "\n🚀 Handover complete. Old process dying in 2s...\r\n"
+            for nick, session in list(self.dcc.sessions.items()):
+                if session and session.transport:
+                    try:
+                        session.transport.write(msg.encode('utf-8'))
+                    except:
+                        pass
+        time.sleep(2.0)
+        # -----------------------------------
+
         os._exit(0)
 
     # die process
     def die(self, reason="Killed by !die"):
-        import os
+        """Kill the bot gracefully"""
         import sys
+        import time
+        import logging
         from pathlib import Path
         from twisted.internet import reactor
 
-        try:
-            self.sendLine(f"QUIT :{reason}")
-        except Exception:
-            pass
+        logger.info(f"💀 DIE command received: {reason}")
 
-        instance = os.getenv("BLACKBOT_INSTANCE_NAME", "main")
-        base_dir = Path(__file__).resolve().parent
-        pid_path = base_dir / "instances" / instance / f"{instance}.pid"
+        # Graceful shutdown CU închidere SQL
+        self.graceful_shutdown(reason)
 
+        # Șterge PID file
         try:
+            instance = os.getenv("BLACKBOT_INSTANCE_NAME", "main")
+            base_dir = Path(__file__).resolve().parent
+            pid_path = base_dir / "instances" / instance / f"{instance}.pid"
+
             if pid_path.exists():
                 pid_path.unlink()
-        except Exception:
-            pass
+                logger.info(f"🗑️  Removed PID file: {pid_path}")
+        except Exception as e:
+            logger.warning(f"Could not remove PID file: {e}")
 
-        try:
-            reactor.stop()
-        except Exception:
-            pass
-        os._exit(0)
+        # MODIFICARE: NU mai folosi callLater - oprește INSTANT
+        logger.info("👋 Goodbye!")
+
+        # Flush logs
+        for handler in logging.getLogger().handlers:
+            try:
+                handler.flush()
+            except:
+                pass
+
+        time.sleep(2.0)
+
+        if reactor.running:
+            reactor.callFromThread(reactor.stop)
+
 
     def get_process(self, command):
         filtered_dicts = [my_dict for my_dict in self.commands if command in my_dict.values()]
@@ -1849,7 +2569,10 @@ class Bot(irc.IRCClient):
                 'core.nettools',
                 'core.monitor_client',
                 'core.optimized_cache',
-                'core.ban_expiration_manager'
+                'core.ban_expiration_manager',
+                'core.dcc_log_handler',
+                'core.nettools',
+                'core.threading_utils'
             ]
             for mod_name in modules_to_reload:
                 if mod_name in sys.modules:
@@ -2012,19 +2735,27 @@ class Bot(irc.IRCClient):
         if not chan_dict:
             return
 
+        import time
         now = time.time()
         to_delete = []
         count = 0
 
         # sortăm după ts ca să luăm pe cei mai vechi întâi
         for nick_l, data in sorted(chan_dict.items(), key=lambda kv: kv[1].get("ts", 0)):
+            # 1. Verificăm expirarea
             if now - data.get("ts", now) > self.pending_ban_max_age:
                 to_delete.append(nick_l)
                 continue
+
             if count >= max_per_batch:
                 break
 
             nick = data["nick"]
+
+            if nick == self.nickname:
+                to_delete.append(nick_l)
+                continue
+
             ident = data.get("ident") or "*"
             host = data.get("host") or "*"
             realname = data.get("realname") or None
@@ -2034,11 +2765,13 @@ class Bot(irc.IRCClient):
                     channel, nick, ident, host, realname
                 )
             except Exception as e:
-                self.logger.error(f"pending ban check failed for {nick} on {channel}: {e}")
+                if hasattr(self, 'logger'):
+                    self.logger.error(f"pending ban check failed for {nick} on {channel}: {e}")
 
             to_delete.append(nick_l)
             count += 1
 
+        # Curățăm userii procesați
         for nick_l in to_delete:
             chan_dict.pop(nick_l, None)
 
@@ -2148,11 +2881,12 @@ class BotFactory(protocol.ReconnectingClientFactory):
     def rotate_and_connect(self):
         host, port, vhost = server_next_round_robin()
         delay = getattr(s, "reconnectDelaySeconds", 10)
+        if self.shutting_down:
+            return
         logger.info(
             f"🔁 Reconnecting to {host}:{port} (vhost={vhost}) in {delay}s ..."
         )
         reactor.callLater(delay, self.connect_to, host, port, vhost)
-
 
     def connect_to(self, host, port, vhost):
         self.server = vhost
@@ -2177,11 +2911,16 @@ class BotFactory(protocol.ReconnectingClientFactory):
                 reactor.connectTCP(host, int(port), self)
 
     def clientConnectionLost(self, connector, reason):
+        if self.shutting_down:
+            logger.info("🔌 Connection closed cleanly (Shutdown Mode).")
+            return
         logger.info(f"Connection lost: {reason}. Rotating server & reconnecting...")
         v.connected = False
         self.rotate_and_connect()
 
     def clientConnectionFailed(self, connector, reason):
+        if self.shutting_down:
+            return
         logger.info(f"Connection failed: {reason}. Rotating server & retrying...")
         v.connected = False
         self.rotate_and_connect()
@@ -2260,7 +2999,6 @@ def host_resolve(host):
         return [flag, host, vserver]
 
 
-
 def server_connect(first_server):  # connect to server
     global servers_order
 
@@ -2300,6 +3038,7 @@ def server_choose_to_connect():
             server = connect
     return [server[0], server[1], server[2]]
 
+
 def server_next_round_robin():
     global servers_order
     if not s.servers:
@@ -2324,9 +3063,44 @@ class ClientSSLContext(ssl.ClientContextFactory):
                 sys.exit(1)
         return ctx
 
+
+def setup_signal_handlers(bot_instance):
+    """Setup signal handlers for graceful shutdown"""
+    import signal
+    import sys
+
+    def signal_handler(signum, frame):
+        signal_name = signal.Signals(signum).name
+        logger.info(f"⚠️  Received signal: {signal_name}")
+
+        try:
+            # Graceful shutdown
+            bot_instance.graceful_shutdown(f"Signal {signal_name}")
+
+            # Stop reactor
+            from twisted.internet import reactor
+            if reactor.running:
+                reactor.stop()
+
+            sys.exit(0)
+        except Exception as e:
+            logger.error(f"Error in signal handler: {e}")
+            sys.exit(1)
+
+    # Register handlers
+    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
+    signal.signal(signal.SIGTERM, signal_handler)  # kill command
+
+    # Windows nu suportă SIGHUP
+    if hasattr(signal, 'SIGHUP'):
+        signal.signal(signal.SIGHUP, signal_handler)  # Terminal closed
+
+    logger.info("✅ Signal handlers installed (SIGINT, SIGTERM)")
+
 if __name__ == '__main__':
     from pathlib import Path
     import os
+
     instance = os.getenv("BLACKBOT_INSTANCE_NAME", "main")
     base_dir = Path(__file__).resolve().parent
     try:
@@ -2346,5 +3120,16 @@ if __name__ == '__main__':
     host, port, vhost = server_choose_to_connect()
     factory = BotFactory(s.nickname, s.realname)
     factory.connect_to(host, port, vhost)
+
+
+    def setup_signals_when_ready():
+        if current_instance:
+            setup_signal_handlers(current_instance)
+        else:
+            # Retry dacă bot-ul nu e încă creat
+            reactor.callLater(1.0, setup_signals_when_ready)
+
+
+    reactor.callLater(1.0, setup_signals_when_ready)
     logger.debug(f"🚀 BlackBoT started successfully! Connecting to {host}:{port}")
     reactor.run()

@@ -1,71 +1,96 @@
-# 🤖 BlackBoT – Modern IRC Bot with Multi‑Instance Manager
+# 🤖 BlackBoT — Modular IRC Bot with Web Stats & Multi-Instance Manager
 
-Welcome to **BlackBoT**, a modular, modern, multi‑instance capable IRC bot written in Python.
+BlackBoT is a modern, modular IRC bot written in Python, designed for **stability**, **performance**, and **multi-instance operation**.  
+It includes a powerful **Web Statistics UI**, a full **instance manager**, and a rich command system with fine-grained permissions.
 
-Check [https://uptime.tclscripts.net](https://uptime.tclscripts.net) for BoT Uptime Contest
-
----
-
-## 🚀 Features
-
-* 🔥 **Multi‑Instance Manager** (create, start, stop, edit, delete bots)
-* 📦 **Per‑instance environment configuration** (`.env`)
-* 🔐 **NickServ authentication** (with optional ident requirement)
-* 🛡️ **SSL/TLS support** (server TLS + optional client certificates)
-* 🧠 **Auto‑update system**
-* 🚓 **Flood protection**
-* 🎚️ **Per‑instance logging**
-* 🧵 **ThreadWorker supervisor** (safe background workers)
-* 📡 **DCC support**
-* 🔄 **BotLink system** (inter‑bot communication)
-* 🧩 **Modular command system** (channel + PM + DCC commands)
+**Uptime Contest:**  
+https://uptime.tclscripts.net (BlackBoT instances)
 
 ---
 
-## 📁 Project Structure
+# 📊 Stats Module (Web UI) — Overview
 
-```
-BlackBoT/
-│── Manager.py
-│── Launcher.py
-│── BlackBoT.py
-│── commands.py
-│── environment_config.py
-│── SQL.py
-│── ...
-│
-└── instances/
-    └── <InstanceName>/
-        ├── .env
-        ├── logs/
-        ├── data/
-        ├── <bot>.db
-        └── <bot>.pid
-```
+The **Stats Module** is one of the core features of BlackBoT.
+
+It collects IRC activity in real time and provides a **beautiful web interface** for both channels and users.
+
+## 🔗 Access Links
+
+Once a bot instance is running, the Stats UI is available at:
+
+- **Channel UI**  
+  `http://<server-ip>:<port>/ui/<channel>`
+
+- **User Profile**  
+  `http://<server-ip>:<port>/profile/<channel>/<nick>`
+
+> If `STATS_API_HOST=0.0.0.0`, the UI is exposed on the server IP + port.
+
+Each bot instance can run its own Stats UI on a **separate port** (multi-bot safe).
 
 ---
 
-# 🛠 Installation
+## 🧰 What the Stats UI Provides
 
-## 1️⃣ Requirements
+### 📌 Channel View (`/ui/<channel>`)
+- total messages, words, active users
+- **Top Talkers** (messages / words / characters)
+- activity heatmap (peak hours)
+- fun metrics (emoji, caps, questions, exclamations, links)
+- **reply pairs** (who interacts with whom)
+- records (longest message, most emojis, etc.)
 
-* Python 3.8+
-* Git
-* OpenSSL (for SSL IRC connections)
-* A Linux system is recommended, but Windows works too
+### 👤 User Profile (`/profile/<channel>/<nick>`)
+- total messages & activity style
+- average words per message
+- question / exclamation rate
+- sentiment analysis + trends
+- preferred hours & activity patterns
+- top interaction partners
 
-## 2️⃣ Clone Repository
+---
 
-```
-git clone https://github.com/tclscripts/BlackBoT.git
-cd BlackBoT
-```
+# ⚡ Highlights (Fixes & Improvements)
 
-## 3️⃣ Initial Setup (Automatic)
+## ✅ Fixes & Stability
+- safer restart / shutdown logic
+- improved DB locking & retry handling
+- more predictable ban / unban logic
+- consistent user linking (click nick → profile)
+- robust stats API startup & recovery
 
-Run the launcher:
+## 🧠 Memory & Performance
+- optimized SQLite usage (WAL, cache tuning)
+- batched stats aggregation (non-blocking)
+- reduced memory pressure in workers
+- smarter caching for frequent lookups
+- thread supervisor for background workers
 
-```
+---
+
+# 🚀 Core Features
+
+- 🔥 **Multi-Instance Manager** (create / start / stop / restart bots)
+- 📦 Per-instance `.env` configuration
+- 📊 **Web Stats UI (per instance port)**
+- 🧠 Automatic updates
+- 🔐 NickServ authentication
+- 🛡️ SSL/TLS IRC connections
+- 🚓 Flood protection
+- 📡 DCC support
+- 🧵 Threaded background workers
+- 🧩 Modular command system
+- 🗂️ SQLite backend (per instance)
+
+---
+
+# ▶️ Getting Started
+
+## 1️⃣ Start with the Launcher (IMPORTANT)
+
+BlackBoT is **always started via the Launcher** on first run.
+
+```bash
 python3 Launcher.py
 ```
 

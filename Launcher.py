@@ -86,7 +86,10 @@ class HybridBlackBotLauncher:
             "bcrypt",
             "watchdog",
             "requests",
-            "pyyaml"  # For advanced config
+            "pyyaml" ,
+            "fastapi",
+            "uvicorn",
+            "pydantic"
         ]
         self.optional_packages = [
             "python-dotenv",  # Enhanced .env support
