@@ -69,7 +69,6 @@ class AggregatorConfig:
         self.heart_re = re.compile(r"(❤️|♥|<3)")
 
         self._initialized = True
-        logger.info("AggregatorConfig initialized")
 
     def update(self, **kwargs):
         """Thread-safe config update"""
@@ -176,11 +175,6 @@ class StatsAggregator:
         # State recovery: load last processed ID from DB
         self._load_processing_state()
 
-        logger.info(
-            f"StatsAggregator initialized "
-            f"(last_processed_id={self._last_processed_id})"
-        )
-
     # =========================================================================
     # State Management (Thread-Safe)
     # =========================================================================
@@ -276,8 +270,6 @@ class StatsAggregator:
             if max_events is None:
                 max_events = self.config.max_events_per_batch
 
-            logger.info(f"[Batch #{batch_id}] Starting aggregation (max_events={max_events})")
-
             # ✅ Fetch events - atomic read of last_processed_id
             with self._state_context():
                 last_id = self._last_processed_id
@@ -288,7 +280,6 @@ class StatsAggregator:
                 duration = time.time() - start_time
                 self._update_metrics(0, duration, True)
 
-                logger.debug(f"[Batch #{batch_id}] No new events to process")
                 return {
                     "status": "success",
                     "batch_id": batch_id,
@@ -297,7 +288,6 @@ class StatsAggregator:
                 }
 
             events_processed = len(events)
-            logger.info(f"[Batch #{batch_id}] Processing {events_processed} events...")
 
             # ✅ Process events with retry logic
             self._process_events_with_retry(events, batch_id)
@@ -309,11 +299,6 @@ class StatsAggregator:
 
             duration = time.time() - start_time
             self._update_metrics(events_processed, duration, True)
-
-            logger.info(
-                f"[Batch #{batch_id}] ✅ Complete: {events_processed} events "
-                f"in {duration:.2f}s ({events_processed/duration:.1f} ev/s)"
-            )
 
             return {
                 "status": "success",
@@ -1314,10 +1299,7 @@ def run_aggregation_periodic(sql_instance, interval_seconds: int = 300) -> None:
             result = aggregator.aggregate_all()
 
             if result["status"] == "success":
-                logger.info(
-                    f"✅ Periodic aggregation: {result['events_processed']} events "
-                    f"in {result['duration']:.2f}s"
-                )
+                pass
             elif result["status"] == "skipped":
                 logger.debug(f"⏭️  Periodic aggregation skipped: {result['reason']}")
             else:
