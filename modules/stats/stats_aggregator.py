@@ -344,7 +344,6 @@ class StatsAggregator:
         # 1) DAILY stats
         daily_stats = self._group_events_daily(events)
         self._update_daily_stats(daily_stats)
-        self._update_words_stats(events)
 
         # 2) HOURLY stats
         self._update_hourly_stats(events)
@@ -354,6 +353,14 @@ class StatsAggregator:
 
         # 4) REPLY PAIRS
         self._update_reply_pairs(events)
+
+        # 5) NEW: words / last spoken / records
+        self._update_words_daily(events)
+        self._update_last_spoken(events)
+        self._update_channel_records(events)
+
+        # 6) NICK activity
+        self._update_nick_activity(events)
 
     # =========================================================================
     # Fetch Events
@@ -497,6 +504,208 @@ class StatsAggregator:
 
         return daily
 
+    # =========================================================================
+    # NEW: WORDS DAILY
+    # =========================================================================
+    def _update_words_daily(self, events: List[dict]) -> None:
+        """
+        Populează STATS_WORDS_DAILY (top words per zi/canal).
+        """
+        if not events:
+            return
+
+        counts: Dict[Tuple[int, str, str, str], int] = defaultdict(int)
+        # key = (botId, channel, date, word)
+
+        for e in events:
+            if not _is_valid_channel(e.get("channel")):
+                continue
+            if e.get("event_type") not in ("PRIVMSG", "ACTION"):
+                continue
+            msg = e.get("message") or ""
+            if not msg:
+                continue
+
+            date_str = datetime.datetime.fromtimestamp(e["ts"]).strftime("%Y-%m-%d")
+            bot_id = int(e["botId"])
+            channel = str(e["channel"])
+
+            for w in _extract_words(msg):
+                counts[(bot_id, channel, date_str, w)] += 1
+
+        if not counts:
+            return
+
+        upsert_sql = """
+            INSERT INTO STATS_WORDS_DAILY (botId, channel, date, word, count)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(botId, channel, date, word) DO UPDATE SET
+                count = count + excluded.count
+        """
+
+        # executăm în batch
+        rows = [(k[0], k[1], k[2], k[3], v) for k, v in counts.items()]
+        for r in rows:
+            self.sql.sqlite3_insert(upsert_sql, r)
+
+    # =========================================================================
+    # NEW: LAST SPOKEN
+    # =========================================================================
+    def _update_last_spoken(self, events: List[dict]) -> None:
+        """
+        Populează STATS_LAST_SPOKEN (ultimul mesaj + ultimul cuvânt).
+        """
+        if not events:
+            return
+
+        latest: Dict[Tuple[int, str, str], Tuple[int, str, str]] = {}
+        # key=(botId, channel, nick) -> (ts, message, last_word)
+
+        for e in events:
+            if not _is_valid_channel(e.get("channel")):
+                continue
+            if e.get("event_type") not in ("PRIVMSG", "ACTION"):
+                continue
+
+            msg = e.get("message") or ""
+            if not msg:
+                continue
+
+            key = (int(e["botId"]), str(e["channel"]), str(e["nick"]))
+            ts = int(e["ts"])
+            lw = _last_word(msg)
+
+            cur = latest.get(key)
+            if (cur is None) or (ts >= cur[0]):
+                latest[key] = (ts, msg, lw)
+
+        if not latest:
+            return
+
+        upsert_sql = """
+            INSERT INTO STATS_LAST_SPOKEN (botId, channel, nick, last_ts, last_message, last_word)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(botId, channel, nick) DO UPDATE SET
+                last_ts = excluded.last_ts,
+                last_message = excluded.last_message,
+                last_word = excluded.last_word
+            WHERE excluded.last_ts >= STATS_LAST_SPOKEN.last_ts
+        """
+
+        for (bot_id, channel, nick), (ts, msg, lw) in latest.items():
+            self.sql.sqlite3_insert(upsert_sql, (bot_id, channel, nick, ts, msg, lw))
+
+    # =========================================================================
+    # NEW: CHANNEL RECORDS
+    # =========================================================================
+    def _update_channel_records(self, events: List[dict]) -> None:
+        """
+        Populează STATS_CHANNEL_RECORDS:
+        - longest line (chars)
+        - most emojis in one line
+        - peak minute (max messages in same minute)
+        """
+        if not events:
+            return
+
+        # 1) candidate records per (botId, channel)
+        best_longest: Dict[Tuple[int, str], Tuple[int, str, int, str]] = {}
+        # -> (chars, nick, ts, message)
+        best_emojis: Dict[Tuple[int, str], Tuple[int, str, int, str]] = {}
+        # -> (emoji_count, nick, ts, message)
+
+        # 2) peak minute counts
+        per_minute: Dict[Tuple[int, str, int], int] = defaultdict(int)
+        # key=(botId, channel, minute_ts) minute_ts = (ts//60)*60
+
+        for e in events:
+            if not _is_valid_channel(e.get("channel")):
+                continue
+            if e.get("event_type") not in ("PRIVMSG", "ACTION"):
+                continue
+
+            bot_id = int(e["botId"])
+            channel = str(e["channel"])
+            nick = str(e["nick"])
+            ts = int(e["ts"])
+            msg = e.get("message") or ""
+            if not msg:
+                continue
+
+            key = (bot_id, channel)
+
+            # longest
+            ch = len(msg)
+            cur_l = best_longest.get(key)
+            if (cur_l is None) or (ch > cur_l[0]):
+                best_longest[key] = (ch, nick, ts, msg)
+
+            # most emojis
+            em = _count_emojis(msg)
+            cur_e = best_emojis.get(key)
+            if (cur_e is None) or (em > cur_e[0]):
+                best_emojis[key] = (em, nick, ts, msg)
+
+            # peak minute
+            minute_ts = (ts // 60) * 60
+            per_minute[(bot_id, channel, minute_ts)] += 1
+
+        # Ensure rows exist
+        for (bot_id, channel) in set(list(best_longest.keys()) + list(best_emojis.keys())):
+            self.sql.sqlite3_insert(
+                "INSERT OR IGNORE INTO STATS_CHANNEL_RECORDS (botId, channel) VALUES (?, ?)",
+                (bot_id, channel)
+            )
+
+        # Update longest / most emojis (only if better than existing)
+        for (bot_id, channel), (chars, nick, ts, msg) in best_longest.items():
+            self.sql.sqlite3_update("""
+                UPDATE STATS_CHANNEL_RECORDS
+                SET longest_chars = ?,
+                    longest_nick = ?,
+                    longest_ts = ?,
+                    longest_message = ?
+                WHERE botId = ? AND channel = ?
+                  AND (longest_chars IS NULL OR longest_chars = 0 OR ? > longest_chars)
+            """, (chars, nick, ts, msg, bot_id, channel, chars))
+
+        for (bot_id, channel), (cnt, nick, ts, msg) in best_emojis.items():
+            self.sql.sqlite3_update("""
+                UPDATE STATS_CHANNEL_RECORDS
+                SET most_emojis = ?,
+                    most_emojis_nick = ?,
+                    most_emojis_ts = ?,
+                    most_emojis_message = ?
+                WHERE botId = ? AND channel = ?
+                  AND (most_emojis IS NULL OR most_emojis = 0 OR ? > most_emojis)
+            """, (cnt, nick, ts, msg, bot_id, channel, cnt))
+
+        # Peak minute: găsește max per (botId, channel) în batch
+        peak_best: Dict[Tuple[int, str], Tuple[int, int, str]] = {}
+        # -> (count, minute_ts, label)
+
+        for (bot_id, channel, minute_ts), cnt in per_minute.items():
+            key = (bot_id, channel)
+            label = datetime.datetime.fromtimestamp(minute_ts).strftime("%Y-%m-%d %H:%M")
+            cur = peak_best.get(key)
+            if (cur is None) or (cnt > cur[0]):
+                peak_best[key] = (cnt, minute_ts, label)
+
+        for (bot_id, channel), (cnt, mts, label) in peak_best.items():
+            self.sql.sqlite3_insert(
+                "INSERT OR IGNORE INTO STATS_CHANNEL_RECORDS (botId, channel) VALUES (?, ?)",
+                (bot_id, channel)
+            )
+            self.sql.sqlite3_update("""
+                UPDATE STATS_CHANNEL_RECORDS
+                SET peak_minute_count = ?,
+                    peak_minute_ts = ?,
+                    peak_minute_label = ?
+                WHERE botId = ? AND channel = ?
+                  AND (peak_minute_count IS NULL OR peak_minute_count = 0 OR ? > peak_minute_count)
+            """, (cnt, mts, label, bot_id, channel, cnt))
+
+
     def _update_daily_stats(self, daily_stats: dict) -> None:
         """
         Update STATS_DAILY table cu INSERT ... ON CONFLICT DO UPDATE.
@@ -568,47 +777,69 @@ class StatsAggregator:
                     exc_info=True
                 )
 
-    def _update_words_stats(self, events: List[dict]) -> None:
+    def _update_nick_activity(self, events: List[dict]) -> None:
         """
-        Aggregate words into STATS_WORDS_DAILY
+        Populează STATS_NICK_ACTIVITY pentru retention:
+        - first_seen_ts = primul eveniment văzut în canal
+        - last_seen_ts  = ultimul eveniment văzut în canal
         """
-        words_daily = defaultdict(int)
-
-        for e in events:
-            if e["event_type"] not in ("PRIVMSG", "ACTION"):
-                continue
-            if not _is_valid_channel(e["channel"]):
-                continue
-            if not e["message"]:
-                continue
-
-            date_str = datetime.datetime.fromtimestamp(e["ts"]).strftime("%Y-%m-%d")
-
-            # split words (basic, already counted in IRC_EVENTS.words)
-            for word in re.findall(r"[a-zA-Z0-9_]{3,}", e["message"].lower()):
-                key = (e["botId"], e["channel"], date_str, word)
-                words_daily[key] += 1
-
-        if not words_daily:
+        if not events:
             return
 
-        sql = """
-              INSERT INTO STATS_WORDS_DAILY
-                  (botId, channel, date, word, count)
-              VALUES (?, ?, ?, ?, ?) ON CONFLICT(botId, channel, date, word)
-            DO \
-              UPDATE SET \
-                  count = count + excluded.count \
-              """
+        # key=(botId, channel, nick) -> (min_ts, max_ts)
+        seen: Dict[Tuple[int, str, str], Tuple[int, int]] = {}
 
-        for (botId, channel, date, word), cnt in words_daily.items():
-            try:
-                self.sql.sqlite3_insert(sql, (botId, channel, date, word, cnt))
-            except Exception as e:
-                logger.error(
-                    f"Error updating STATS_WORDS_DAILY for {channel} [{word}]: {e}",
-                    exc_info=True
-                )
+        for e in events:
+            channel = e.get("channel")
+            if not _is_valid_channel(channel):
+                continue
+
+            # considerăm "activity" orice eveniment relevant de user în canal
+            # (poți restrânge la PRIVMSG/ACTION dacă vrei)
+            if e.get("event_type") not in ("PRIVMSG", "ACTION", "JOIN", "PART", "QUIT", "KICK", "NICK"):
+                continue
+
+            bot_id = int(e["botId"])
+            nick = str(e.get("nick") or "").strip()
+            if not nick:
+                continue
+
+            ts = int(e["ts"])
+            key = (bot_id, str(channel), nick)
+
+            cur = seen.get(key)
+            if cur is None:
+                seen[key] = (ts, ts)
+            else:
+                mn, mx = cur
+                if ts < mn:
+                    mn = ts
+                if ts > mx:
+                    mx = ts
+                seen[key] = (mn, mx)
+
+        if not seen:
+            return
+
+        upsert = """
+                 INSERT INTO STATS_NICK_ACTIVITY (botId, channel, nick, first_seen_ts, last_seen_ts)
+                 VALUES (?, ?, ?, ?, ?) ON CONFLICT(botId, channel, nick) DO \
+                 UPDATE SET
+                     first_seen_ts = CASE \
+                     WHEN STATS_NICK_ACTIVITY.first_seen_ts IS NULL THEN excluded.first_seen_ts \
+                     WHEN excluded.first_seen_ts < STATS_NICK_ACTIVITY.first_seen_ts THEN excluded.first_seen_ts \
+                     ELSE STATS_NICK_ACTIVITY.first_seen_ts
+                 END \
+                 ,
+                last_seen_ts = CASE
+                    WHEN STATS_NICK_ACTIVITY.last_seen_ts IS NULL THEN excluded.last_seen_ts
+                    WHEN excluded.last_seen_ts > STATS_NICK_ACTIVITY.last_seen_ts THEN excluded.last_seen_ts
+                    ELSE STATS_NICK_ACTIVITY.last_seen_ts
+                 END \
+                 """
+
+        for (bot_id, channel, nick), (mn, mx) in seen.items():
+            self.sql.sqlite3_insert(upsert, (bot_id, channel, nick, mn, mx))
 
     # =========================================================================
     # HOURLY Stats (Heatmap)
