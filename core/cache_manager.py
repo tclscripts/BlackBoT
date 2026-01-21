@@ -57,6 +57,12 @@ class LoggedUsersCache:
             raise KeyError(userId)
         return user_data
 
+    def __delitem__(self, host):
+        """Enable del cache[host] syntax"""
+        with self._lock:
+            if not self._cache.delete(host):
+                raise KeyError(host)
+
     def __setitem__(self, userId, value):
         """Dict-like assignment: self.logged_in_users[userId] = {...}"""
         self._cache.set(userId, value)
