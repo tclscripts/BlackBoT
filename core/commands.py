@@ -2241,83 +2241,419 @@ def cmd_botlink(self, channel, feedback, nick, host, msg):
             self.send_message(feedback, f"Usage: {config.char}botlink add|del|list|connect|disconnect")
             return None
 
+
+def _is_ip_or_hostname(text: str) -> bool:
+    """
+    Check if text is an IP address or resolvable hostname.
+    If not, assume it's a nickname.
+
+    This helper is used by cmd_ip, cmd_dns, cmd_ping.
+    """
+    from core import nettools
+
+    # Check if it's an IP
+    if nettools._is_ip(text):
+        return True
+
+    # Check if it looks like a hostname (contains dots or is localhost)
+    if '.' in text or text.lower() == 'localhost':
+        return True
+
+    return False
+
+
 def cmd_dns(self, channel, feedback, nick, host, msg):
+    """
+    !dns <host|ip|nick>
+
+    Smart DNS lookup: hostname → A/AAAA, IP → rDNS (PTR)
+    If nick is provided, does WHO lookup first.
+
+    Examples:
+      !dns google.com
+      !dns 8.8.8.8
+      !dns Enki  <- NEW: Does WHO lookup automatically
+    """
     from core import nettools
     from twisted.internet.threads import deferToThread
+
     target = (msg or "").strip().split()[0] if msg else ""
     if not target:
-        self.send_message(feedback, f"Usage: {config.char}dns <host|ip>")
+        self.send_message(feedback, f"Usage: {config.char}dns <host|ip|nick>")
         return
 
-    def work():
-        res = nettools.smart_dns(target)
-        return nettools.format_smart_dns(res)
+    if _is_ip_or_hostname(target):
+        # Direct lookup for IP/hostname
+        def work():
+            res = nettools.smart_dns(target)
+            return nettools.format_smart_dns(res)
 
-    def done(lines):
-        for line in lines:
-            self.send_message(feedback, line)
+        def done(lines):
+            for line in lines:
+                self.send_message(feedback, line)
 
-    deferToThread(work).addCallback(done)
+        deferToThread(work).addCallback(done)
+
+    else:
+        # WHO lookup for nick
+        def on_who_result(info):
+            if not info:
+                # Cache fallback
+                if hasattr(self, "channel_details"):
+                    for row in self.channel_details:
+                        if len(row) > 3 and (row[1] or "").lower() == target.lower():
+                            info = {
+                                'nick': row[1],
+                                'host': row[3]
+                            }
+                            break
+
+            if not info:
+                self.send_message(feedback, f"❌ Cannot resolve user: {target}")
+                return
+
+            user_host = info.get('host', '')
+            user_nick = info.get('nick', target)
+
+            if not user_host:
+                self.send_message(feedback, f"❌ No host found for {user_nick}")
+                return
+
+            # DNS lookup on resolved host
+            def work():
+                res = nettools.smart_dns(user_host)
+                return nettools.format_smart_dns(res)
+
+            def done(lines):
+                if lines:
+                    lines[0] = f"👤 {user_nick} ({user_host}): {lines[0]}"
+                for line in lines:
+                    self.send_message(feedback, line)
+
+            deferToThread(work).addCallback(done)
+
+        def on_who_error(failure):
+            self.send_message(feedback, f"❌ Cannot resolve user: {target}")
+
+        if hasattr(self, "get_user_info_async"):
+            d = self.get_user_info_async(target, timeout=5.0)
+            d.addCallback(on_who_result)
+            d.addErrback(on_who_error)
+        else:
+            self.send_message(feedback, f"❌ WHO lookup not available. Try: {config.char}dns <host|ip>")
+
 
 def cmd_ping(self, channel, feedback, nick, host, msg):
+    """
+    !ping <host|ip|nick>
+
+    Ping a host (IPv4 or IPv6).
+    If nick is provided, does WHO lookup first.
+
+    Examples:
+      !ping google.com
+      !ping 8.8.8.8
+      !ping Enki  <- NEW: Does WHO lookup automatically
+    """
     from core import nettools
     from twisted.internet.threads import deferToThread
+
     target = (msg or "").strip().split()[0] if msg else ""
     if not target:
-        self.send_message(feedback, f"Usage: {config.char}ping <host|ip>")
+        self.send_message(feedback, f"Usage: {config.char}ping <host|ip|nick>")
         return
-    def work():
-        result = nettools.ping(target)
-        return nettools.format_ping(result)
 
-    def done(lines):
-        for line in lines:
-            self.send_message(feedback, line)
+    if _is_ip_or_hostname(target):
+        # Direct ping for IP/hostname
+        def work():
+            result = nettools.ping(target)
+            return nettools.format_ping(result)
 
-    deferToThread(work).addCallback(done)
+        def done(lines):
+            for line in lines:
+                self.send_message(feedback, line)
+
+        deferToThread(work).addCallback(done)
+
+    else:
+        # WHO lookup for nick
+        def on_who_result(info):
+            if not info:
+                # Cache fallback
+                if hasattr(self, "channel_details"):
+                    for row in self.channel_details:
+                        if len(row) > 3 and (row[1] or "").lower() == target.lower():
+                            info = {
+                                'nick': row[1],
+                                'host': row[3]
+                            }
+                            break
+
+            if not info:
+                self.send_message(feedback, f"❌ Cannot resolve user: {target}")
+                return
+
+            user_host = info.get('host', '')
+            user_nick = info.get('nick', target)
+
+            if not user_host:
+                self.send_message(feedback, f"❌ No host found for {user_nick}")
+                return
+
+            # Ping resolved host
+            def work():
+                result = nettools.ping(user_host)
+                return nettools.format_ping(result)
+
+            def done(lines):
+                if lines:
+                    lines[0] = f"👤 {user_nick} ({user_host}): {lines[0]}"
+                for line in lines:
+                    self.send_message(feedback, line)
+
+            deferToThread(work).addCallback(done)
+
+        def on_who_error(failure):
+            self.send_message(feedback, f"❌ Cannot resolve user: {target}")
+
+        if hasattr(self, "get_user_info_async"):
+            d = self.get_user_info_async(target, timeout=5.0)
+            d.addCallback(on_who_result)
+            d.addErrback(on_who_error)
+        else:
+            self.send_message(feedback, f"❌ WHO lookup not available. Try: {config.char}ping <host|ip>")
 
 
 def cmd_ip(self, channel, feedback, nick, host, msg):
+    """
+    !ip <ip|host|nick>
+
+    Get IP/host information (ASN/ORG/LOC/TZ).
+    If nick is provided, does WHO lookup first.
+
+    Examples:
+      !ip 8.8.8.8
+      !ip google.com
+      !ip Enki  <- NEW: Does WHO lookup automatically
+    """
     from core import nettools
     from twisted.internet.threads import deferToThread
+
     target = (msg or "").strip().split()[0] if msg else ""
     if not target:
-        self.send_message(feedback, f"Usage: {config.char}ip <ip|host>")
+        self.send_message(feedback, f"Usage: {config.char}ip <ip|host|nick>")
         return
 
-    def work():
-        res = nettools.ip_info(target)          # colectează info
-        return nettools.format_ipinfo(res)      # formatează pentru IRC
+    if _is_ip_or_hostname(target):
+        # Direct lookup for IP/hostname
+        def work():
+            res = nettools.ip_info(target)
+            return nettools.format_ipinfo(res)
 
-    def done(lines):
-        for line in lines:
-            self.send_message(feedback, line)
+        def done(lines):
+            for line in lines:
+                self.send_message(feedback, line)
 
-    deferToThread(work).addCallback(done)
+        deferToThread(work).addCallback(done)
+
+    else:
+        # WHO lookup for nick
+        def on_who_result(info):
+            if not info:
+                # Cache fallback
+                if hasattr(self, "channel_details"):
+                    for row in self.channel_details:
+                        if len(row) > 3 and (row[1] or "").lower() == target.lower():
+                            info = {
+                                'nick': row[1],
+                                'host': row[3]
+                            }
+                            break
+
+            if not info:
+                self.send_message(feedback, f"❌ Cannot resolve user: {target}")
+                return
+
+            user_host = info.get('host', '')
+            user_nick = info.get('nick', target)
+
+            if not user_host:
+                self.send_message(feedback, f"❌ No host found for {user_nick}")
+                return
+
+            # IP info on resolved host
+            def work():
+                res = nettools.ip_info(user_host)
+                return nettools.format_ipinfo(res)
+
+            def done(lines):
+                if lines:
+                    lines[0] = f"👤 {user_nick} ({user_host}): {lines[0]}"
+                for line in lines:
+                    self.send_message(feedback, line)
+
+            deferToThread(work).addCallback(done)
+
+        def on_who_error(failure):
+            self.send_message(feedback, f"❌ Cannot resolve user: {target}")
+
+        if hasattr(self, "get_user_info_async"):
+            d = self.get_user_info_async(target, timeout=5.0)
+            d.addCallback(on_who_result)
+            d.addErrback(on_who_error)
+        else:
+            self.send_message(feedback, f"❌ WHO lookup not available. Try: {config.char}ip <ip|host>")
+
 
 def cmd_asn(self, channel, feedback, nick, host, msg):
+    """
+    !asn <AS|ip|host|nick> [full]
+
+    ASN information lookup.
+    If nick is provided, does WHO lookup first.
+
+    Examples:
+      !asn AS15169         # ASN lookup
+      !asn AS15169 full    # Detailed ASN info
+      !asn 8.8.8.8         # IP to ASN
+      !asn google.com      # Host to ASN
+      !asn Enki            # NEW: WHO lookup then ASN
+      !asn Enki full       # NEW: WHO lookup then full ASN
+    """
     from core import nettools
     from twisted.internet.threads import deferToThread
 
     args = (msg or "").strip().split()
     if not args:
-        self.send_message(feedback, f"Usage: {config.char}asn <AS|ip|host> [full]")
+        self.send_message(feedback, f"Usage: {config.char}asn <AS|ip|host|nick> [full]")
         return
 
     target = args[0]
     want_full = (len(args) > 1 and args[1].lower() == "full")
 
-    if want_full:
-        def work_full():
-            data = nettools.asn_full(target, sample=6)
-            return nettools.format_asn_full(data)
-        return deferToThread(work_full).addCallback(lambda lines: [self.send_message(feedback, l) for l in lines])
+    # =========================================================================
+    # Helper: Check if target needs WHO lookup
+    # =========================================================================
 
-    # fallback: scurt
-    def work_short():
-        res = nettools.asn_info(target)
-        return nettools.format_asn(res)
-    deferToThread(work_short).addCallback(lambda lines: [self.send_message(feedback, l) for l in lines])
+    def is_asn_or_ip_or_hostname(text: str) -> bool:
+        """
+        Check if text is:
+        - AS number (AS12345 or 12345)
+        - IP address
+        - Hostname (has dots)
+
+        If not, assume it's a nickname.
+        """
+        # Is it an AS number?
+        if text.upper().startswith("AS"):
+            return True
+
+        # Is it just digits (AS number without "AS" prefix)?
+        if text.isdigit():
+            return True
+
+        # Is it an IP?
+        if nettools._is_ip(text):
+            return True
+
+        # Looks like hostname?
+        if '.' in text or text.lower() == 'localhost':
+            return True
+
+        return False
+
+    # =========================================================================
+    # Main Logic
+    # =========================================================================
+
+    if is_asn_or_ip_or_hostname(target):
+        # CASE 1: Direct ASN lookup (AS number, IP, or hostname)
+
+        if want_full:
+            def work_full():
+                data = nettools.asn_full(target, sample=6)
+                return nettools.format_asn_full(data)
+
+            return deferToThread(work_full).addCallback(
+                lambda lines: [self.send_message(feedback, l) for l in lines]
+            )
+
+        else:
+            def work_short():
+                res = nettools.asn_info(target)
+                return nettools.format_asn(res)
+
+            deferToThread(work_short).addCallback(
+                lambda lines: [self.send_message(feedback, l) for l in lines]
+            )
+
+    else:
+        # CASE 2: Target looks like a nick - do WHO lookup first
+
+        def on_who_result(info):
+            """Callback when WHO lookup succeeds"""
+            if not info:
+                # Try cache fallback
+                if hasattr(self, "channel_details"):
+                    for row in self.channel_details:
+                        if len(row) > 3 and (row[1] or "").lower() == target.lower():
+                            info = {
+                                'nick': row[1],
+                                'host': row[3]
+                            }
+                            break
+
+            if not info:
+                self.send_message(feedback, f"❌ Cannot resolve user: {target}")
+                return
+
+            user_host = info.get('host', '')
+            user_nick = info.get('nick', target)
+
+            if not user_host:
+                self.send_message(feedback, f"❌ No host found for {user_nick}")
+                return
+
+            # Now run ASN lookup on the resolved host
+            if want_full:
+                def work_full():
+                    data = nettools.asn_full(user_host, sample=6)
+                    lines = nettools.format_asn_full(data)
+                    # Prepend user info to first line
+                    if lines:
+                        lines[0] = f"👤 {user_nick} ({user_host}): {lines[0]}"
+                    return lines
+
+                deferToThread(work_full).addCallback(
+                    lambda lines: [self.send_message(feedback, l) for l in lines]
+                )
+
+            else:
+                def work_short():
+                    res = nettools.asn_info(user_host)
+                    lines = nettools.format_asn(res)
+                    # Prepend user info to first line
+                    if lines:
+                        lines[0] = f"👤 {user_nick} ({user_host}): {lines[0]}"
+                    return lines
+
+                deferToThread(work_short).addCallback(
+                    lambda lines: [self.send_message(feedback, l) for l in lines]
+                )
+
+        def on_who_error(failure):
+            """Callback when WHO lookup fails"""
+            self.send_message(feedback, f"❌ Cannot resolve user: {target}")
+
+        # Launch async WHO lookup
+        if hasattr(self, "get_user_info_async"):
+            d = self.get_user_info_async(target, timeout=5.0)
+            d.addCallback(on_who_result)
+            d.addErrback(on_who_error)
+        else:
+            # Fallback if async WHO is not available
+            self.send_message(feedback, f"❌ WHO lookup not available. Try: {config.char}asn <AS|ip|host>")
+            return None
 
 
 def cmd_user(self, channel, feedback, nick, host, msg):
