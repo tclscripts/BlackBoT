@@ -344,6 +344,7 @@ class StatsAggregator:
         # 1) DAILY stats
         daily_stats = self._group_events_daily(events)
         self._update_daily_stats(daily_stats)
+        self._update_words_stats(events)
 
         # 2) HOURLY stats
         self._update_hourly_stats(events)
@@ -564,6 +565,48 @@ class StatsAggregator:
             except Exception as e:
                 logger.error(
                     f"Error updating STATS_DAILY for {channel}/{nick}/{date}: {e}",
+                    exc_info=True
+                )
+
+    def _update_words_stats(self, events: List[dict]) -> None:
+        """
+        Aggregate words into STATS_WORDS_DAILY
+        """
+        words_daily = defaultdict(int)
+
+        for e in events:
+            if e["event_type"] not in ("PRIVMSG", "ACTION"):
+                continue
+            if not _is_valid_channel(e["channel"]):
+                continue
+            if not e["message"]:
+                continue
+
+            date_str = datetime.datetime.fromtimestamp(e["ts"]).strftime("%Y-%m-%d")
+
+            # split words (basic, already counted in IRC_EVENTS.words)
+            for word in re.findall(r"[a-zA-Z0-9_]{3,}", e["message"].lower()):
+                key = (e["botId"], e["channel"], date_str, word)
+                words_daily[key] += 1
+
+        if not words_daily:
+            return
+
+        sql = """
+              INSERT INTO STATS_WORDS_DAILY
+                  (botId, channel, date, word, count)
+              VALUES (?, ?, ?, ?, ?) ON CONFLICT(botId, channel, date, word)
+            DO \
+              UPDATE SET \
+                  count = count + excluded.count \
+              """
+
+        for (botId, channel, date, word), cnt in words_daily.items():
+            try:
+                self.sql.sqlite3_insert(sql, (botId, channel, date, word, cnt))
+            except Exception as e:
+                logger.error(
+                    f"Error updating STATS_WORDS_DAILY for {channel} [{word}]: {e}",
                     exc_info=True
                 )
 
