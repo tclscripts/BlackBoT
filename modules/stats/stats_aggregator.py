@@ -1309,11 +1309,6 @@ def run_aggregation_periodic(sql_instance, interval_seconds: int = 300) -> None:
     """
     aggregator = get_aggregator(sql_instance)
 
-    logger.info(
-        f"Starting periodic aggregation (interval={interval_seconds}s, "
-        f"max_events={aggregator.config.max_events_per_batch})"
-    )
-
     while True:
         try:
             result = aggregator.aggregate_all()

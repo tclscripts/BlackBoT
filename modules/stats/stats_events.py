@@ -69,8 +69,6 @@ class StatsEventCapture:
         self._events_captured = 0
         self._events_flushed = 0
 
-        logger.info("StatsEventCapture initialized")
-
     def set_sql(self, sql_instance):
         """Set SQL instance (dacă nu a fost setat la init)"""
         self.sql = sql_instance
@@ -186,10 +184,6 @@ class StatsEventCapture:
                 self.sql.sqlite3_insert(insert_sql, params)
 
             self._events_flushed += len(events_to_insert)
-            logger.debug(
-                f"Flushed {len(events_to_insert)} events to IRC_EVENTS "
-                f"(total captured: {self._events_captured}, flushed: {self._events_flushed})"
-            )
 
         except Exception as e:
             logger.error(f"Failed to flush events to DB: {e}", exc_info=True)
