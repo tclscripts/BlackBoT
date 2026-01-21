@@ -140,6 +140,7 @@ class DCCManager:
         self.port_min, self.port_max = port_range
         self.idle_timeout = idle_timeout
         self.allow_unauthed = allow_unauthed
+        self.active_ephemeral_port = None
 
         with self._registry_lock:
             self._registry.add(self)
@@ -230,27 +231,72 @@ class DCCManager:
     def _pick_port(self) -> int:
         return self.fixed_port or random.randint(self.port_min, self.port_max)
 
-    def _ensure_fixed_listener(self):
+    def _ensure_fixed_listener(self, retry_count=0, max_retries=3, retry_delay=3):
+        """
+        Încearcă să deschidă portul fix DCC cu retry logic.
+
+        Args:
+            retry_count: Numărul curent de încercări
+            max_retries: Numărul maxim de încercări (default: 3)
+            retry_delay: Delay între încercări în secunde (default: 3)
+        """
         if self.listener_port_obj or not self.fixed_port:
             return
+
         try:
             factory = DCCListenFactory(self)
             self.listener_port_obj = reactor.listenTCP(int(self.fixed_port), factory, interface="0.0.0.0")
             self.bot.public_ip = self.public_ip
-            logger.debug(f"[listen] fixed port active on 0.0.0.0:{self.fixed_port}")
+            logger.info(f"✅ [listen] Fixed port {self.fixed_port} opened successfully on 0.0.0.0")
+
+            # Clear any ephemeral port tracking since we're using fixed
+            self.active_ephemeral_port = None
+
         except Exception as e:
-            logger.error(f"[listen] cannot open fixed port {self.fixed_port}: {e} — falling back to ephemeral ports")
-            self.listener_port_obj = None
-            self.fixed_port = None
-            try:
-                msg = f"❌ DCC: cannot open fixed port (using ephemeral): {e}"
-                if hasattr(self.bot, "message_queue"):
-                    self.bot.send_message(self.bot.nickname, msg)
-                else:
-                    reactor.callLater(2.0, lambda: hasattr(self.bot, "message_queue") and self.bot.send_message(
-                        self.bot.nickname, msg))
-            except Exception:
-                pass
+            if retry_count < max_retries:
+                retry_count += 1
+                logger.warning(
+                    f"⚠️ [listen] Cannot open fixed port {self.fixed_port}: {e} "
+                    f"— Retry {retry_count}/{max_retries} in {retry_delay}s..."
+                )
+
+                # Programăm următoarea încercare
+                reactor.callLater(
+                    retry_delay,
+                    self._ensure_fixed_listener,
+                    retry_count,
+                    max_retries,
+                    retry_delay
+                )
+            else:
+                # Am epuizat toate încercările, trecem la ephemeral ports
+                logger.error(
+                    f"❌ [listen] Failed to open fixed port {self.fixed_port} after {max_retries} retries: {e} "
+                    f"— Falling back to ephemeral ports"
+                )
+
+                # Salvăm portul fix original pentru info
+                failed_fixed_port = self.fixed_port
+
+                # Dezactivăm fixed port
+                self.listener_port_obj = None
+                self.fixed_port = None
+
+                # Alegem un port random din range și îl salvăm
+                self.active_ephemeral_port = random.randint(self.port_min, self.port_max)
+
+                try:
+                    msg = (
+                        f"❌ DCC: Cannot open fixed port {failed_fixed_port} after {max_retries} retries. "
+                        f"Using ephemeral port {self.active_ephemeral_port} from range {self.port_min}-{self.port_max}"
+                    )
+                    if hasattr(self.bot, "message_queue"):
+                        self.bot.send_message(self.bot.nickname, msg)
+                    else:
+                        reactor.callLater(2.0, lambda: hasattr(self.bot, "message_queue") and
+                                                       self.bot.send_message(self.bot.nickname, msg))
+                except Exception:
+                    pass
 
     def _gc_pending_offers(self):
         now = time.time()

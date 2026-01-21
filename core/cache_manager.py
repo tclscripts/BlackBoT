@@ -341,6 +341,12 @@ class HostToNicksCache:
         """Check if host exists"""
         return self._cache.get(host) is not None
 
+    def __delitem__(self, host):
+        """Enable del cache[host] syntax"""
+        with self._lock:
+            if not self._cache.delete(host):
+                raise KeyError(host)
+
     def get(self, host, default=None):
         """Get nicks for host"""
         nicks = self._cache.get(host)
