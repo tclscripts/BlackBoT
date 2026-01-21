@@ -227,6 +227,8 @@ def _query_top_talkers(bot_id: int, channel: str, days: int = 30, limit: int = 1
                MAX(last_seen_ts) AS last_seen
         FROM STATS_DAILY
         WHERE botId = ? AND channel = ? AND date >= ?
+        AND nick NOT LIKE '%.%.%'              -- Exclude servers
+        AND nick NOT LIKE '%Serv'              -- Exclude services
         GROUP BY nick
         ORDER BY msgs DESC
         LIMIT ?
