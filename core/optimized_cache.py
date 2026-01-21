@@ -463,6 +463,36 @@ class SmartTTLCache(OptimizedTTLCache):
 
         return warmed_count
 
+    def pop(self, key: Any, default: Any = None) -> Any:
+        """Dict-like pop(). Returns default if missing."""
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                return default
+            # remove and return value
+            del self._data[key]
+            if self._stats:
+                self._stats.size = len(self._data)
+            return entry.value
+
+    def __delitem__(self, key: Any) -> None:
+        """Enable: del cache[key]"""
+        ok = self.delete(key)
+        if not ok:
+            raise KeyError(key)
+
+    def __getitem__(self, key: Any) -> Any:
+        """Enable: cache[key] (raises KeyError if missing/expired)"""
+        val = self.get(key, default=None)
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        """Enable: cache[key] = value"""
+        self.set(key, value)
+
+
     def __del__(self):
         """Cleanup background thread on destruction"""
         try:

@@ -711,6 +711,49 @@ class Bot(irc.IRCClient):
         self.pending_join_requests[name.lower()] = name
         self.join(name)
 
+    def _safe_cache_delete(self, cache_obj, key):
+        """Delete key from dict / cache objects without crashing if unsupported."""
+        if cache_obj is None or key is None:
+            return
+
+        try:
+            # dict-like
+            if hasattr(cache_obj, "pop"):
+                try:
+                    cache_obj.pop(key, None)
+                    return
+                except TypeError:
+                    # some pop() implementations may not accept default
+                    try:
+                        cache_obj.pop(key)
+                        return
+                    except Exception:
+                        pass
+
+            # common cache APIs
+            for meth in ("delete", "remove", "discard", "invalidate"):
+                fn = getattr(cache_obj, meth, None)
+                if callable(fn):
+                    try:
+                        fn(key)
+                        return
+                    except Exception:
+                        pass
+
+            # last resort: if it's a dict-like with __contains__ and supports assignment removal
+            if hasattr(cache_obj, "__contains__") and key in cache_obj:
+                try:
+                    # some caches expose internal dict as .cache or .data
+                    inner = getattr(cache_obj, "cache", None) or getattr(cache_obj, "data", None)
+                    if inner and hasattr(inner, "pop"):
+                        inner.pop(key, None)
+                except Exception:
+                    pass
+
+        except Exception:
+            # never allow cache cleanup to crash the bot
+            pass
+
     def _clean_user_memory(self, nick, channel=None, is_quit=False):
         """
         Curăță urmele unui user din memorie.
