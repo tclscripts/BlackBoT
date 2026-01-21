@@ -1,7 +1,7 @@
 """
 IRC Statistics - Web UI (Single Endpoint)
 =========================================
-FastAPI server care servește o singură pagină UI: /ui/{channel}
+FastAPI server care serveÈ™te o singurÄƒ paginÄƒ UI: /ui/{channel}
 
 Cerinte:
 - FARA endpoint-uri /api/* pentru statistici: totul e render server-side in /ui/{channel}
@@ -26,7 +26,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from modules.stats.stats_user_analytics import get_analytics
 
 from core.sql_manager import SQLManager
-
 
 app = FastAPI(title="IRC Stats UI", version="1.0.0")
 
@@ -82,10 +81,10 @@ def _fmt_last_activity(ts: Optional[int]) -> str:
     if delta < 60:
         return f"{int(delta)}s ago"
     if delta < 3600:
-        return f"{int(delta/60)}m ago"
+        return f"{int(delta / 60)}m ago"
     if delta < 86400:
-        return f"{int(delta/3600)}h ago"
-    return f"{int(delta/86400)}d ago"
+        return f"{int(delta / 3600)}h ago"
+    return f"{int(delta / 86400)}d ago"
 
 
 def _safe_int(x, default=0) -> int:
@@ -113,8 +112,8 @@ def _query_channels(bot_id: int) -> List[Dict[str, Any]]:
         SELECT channel, total_messages, total_users, last_event_ts
         FROM STATS_CHANNEL
         WHERE botId = ?
-        ORDER BY total_messages DESC
-    """
+        ORDER BY total_messages DESC \
+        """
     rows = sql.sqlite_select(q, (bot_id,))
     out = []
     for ch, msgs, users, last_ts in rows:
@@ -131,12 +130,17 @@ def _query_channels(bot_id: int) -> List[Dict[str, Any]]:
 
 def _query_channel_summary(bot_id: int, channel: str) -> Dict[str, Any]:
     q = """
-        SELECT total_messages, total_words, total_users,
-               top_talker_nick, top_talker_count,
-               first_event_ts, last_event_ts
+        SELECT total_messages, \
+               total_words, \
+               total_users,
+               top_talker_nick, \
+               top_talker_count,
+               first_event_ts, \
+               last_event_ts
         FROM STATS_CHANNEL
-        WHERE botId = ? AND channel = ?
-    """
+        WHERE botId = ? \
+          AND channel = ? \
+        """
     rows = sql.sqlite_select(q, (bot_id, channel))
     if not rows:
         return {
@@ -170,15 +174,12 @@ def _query_channel_summary(bot_id: int, channel: str) -> Dict[str, Any]:
 def _query_timeline(bot_id: int, channel: str, days: int = 30) -> List[Dict[str, Any]]:
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     q = """
-        SELECT date,
-               SUM(messages + actions) AS msgs,
-               SUM(words) AS wrds,
-               COUNT(DISTINCT nick) AS usrs
+        SELECT date, SUM (messages + actions) AS msgs, SUM (words) AS wrds, COUNT (DISTINCT nick) AS usrs
         FROM STATS_DAILY
         WHERE botId = ? AND channel = ? AND date >= ?
         GROUP BY date
-        ORDER BY date ASC
-    """
+        ORDER BY date ASC \
+        """
     rows = sql.sqlite_select(q, (bot_id, channel, cutoff))
     out = []
     for d, msgs, wrds, usrs in rows:
@@ -196,8 +197,8 @@ def _query_heatmap(bot_id: int, channel: str) -> List[Dict[str, Any]]:
         SELECT hour, day_of_week, total_messages
         FROM STATS_HOURLY
         WHERE botId = ? AND channel = ?
-        ORDER BY day_of_week ASC, hour ASC
-    """
+        ORDER BY day_of_week ASC, hour ASC \
+        """
     rows = sql.sqlite_select(q, (bot_id, channel))
     out = []
     for hour, day, msgs in rows:
@@ -294,13 +295,21 @@ def _query_top_words(bot_id: int, channel: str, days: int = 30, limit: int = 25)
 
 def _query_records(bot_id: int, channel: str) -> Dict[str, Any]:
     q = """
-        SELECT
-          longest_chars, longest_nick, longest_ts, longest_message,
-          most_emojis, most_emojis_nick, most_emojis_ts, most_emojis_message,
-          peak_minute_count, peak_minute_ts, peak_minute_label
+        SELECT longest_chars, \
+               longest_nick, \
+               longest_ts, \
+               longest_message, \
+               most_emojis, \
+               most_emojis_nick, \
+               most_emojis_ts, \
+               most_emojis_message, \
+               peak_minute_count, \
+               peak_minute_ts, \
+               peak_minute_label
         FROM STATS_CHANNEL_RECORDS
-        WHERE botId = ? AND channel = ?
-    """
+        WHERE botId = ? \
+          AND channel = ? \
+        """
     rows = sql.sqlite_select(q, (bot_id, channel))
     if not rows:
         return {
@@ -390,20 +399,27 @@ def _query_retention(bot_id: int, channel: str, days: int = 7) -> Dict[str, Any]
     cutoff_ts = int((datetime.now() - timedelta(days=days)).timestamp())
 
     q_new = """
-        SELECT COUNT(*)
-        FROM STATS_NICK_ACTIVITY
-        WHERE botId = ? AND channel = ? AND first_seen_ts >= ?
-    """
+            SELECT COUNT(*)
+            FROM STATS_NICK_ACTIVITY
+            WHERE botId = ? \
+              AND channel = ? \
+              AND first_seen_ts >= ? \
+            """
     q_active = """
-        SELECT COUNT(*)
-        FROM STATS_NICK_ACTIVITY
-        WHERE botId = ? AND channel = ? AND last_seen_ts >= ?
-    """
+               SELECT COUNT(*)
+               FROM STATS_NICK_ACTIVITY
+               WHERE botId = ? \
+                 AND channel = ? \
+                 AND last_seen_ts >= ? \
+               """
     q_ret = """
-        SELECT COUNT(*)
-        FROM STATS_NICK_ACTIVITY
-        WHERE botId = ? AND channel = ? AND last_seen_ts >= ? AND (first_seen_ts IS NULL OR first_seen_ts < ?)
-    """
+            SELECT COUNT(*)
+            FROM STATS_NICK_ACTIVITY
+            WHERE botId = ? \
+              AND channel = ? \
+              AND last_seen_ts >= ? \
+              AND (first_seen_ts IS NULL OR first_seen_ts < ?) \
+            """
 
     newcomers = sql.sqlite_select(q_new, (bot_id, channel, cutoff_ts))
     active_now = sql.sqlite_select(q_active, (bot_id, channel, cutoff_ts))
@@ -484,7 +500,7 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
         sidebar_items.append(f"""
             <a class="chan {active}" href="{url}">
                 <div class="chan-name">{ch['channel']}</div>
-                <div class="chan-meta">{ch['messages']:,} msgs · {ch['users']} users</div>
+                <div class="chan-meta">{ch['messages']:,} msgs Â· {ch['users']} users</div>
             </a>
         """)
     sidebar_html = "\n".join(sidebar_items) if sidebar_items else "<div class='empty'>No channels yet</div>"
@@ -751,6 +767,272 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
       .layout {{ grid-template-columns: 1fr; }}
       .sidebar {{ border-right: none; border-bottom: 1px solid var(--stroke); }}
     }}
+
+    /* ========================================= */
+    /* RESPONSIVE DESIGN - Mobile & Tablet      */
+    /* ========================================= */
+
+    /* Hamburger menu button (hidden on desktop) */
+    .menu-toggle {{
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 1000;
+      background: var(--panel);
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      padding: 12px;
+      cursor: pointer;
+      backdrop-filter: blur(12px);
+    }}
+
+    .menu-toggle:hover {{
+      background: var(--panel2);
+    }}
+
+    .menu-icon {{
+      width: 24px;
+      height: 2px;
+      background: var(--text);
+      display: block;
+      position: relative;
+    }}
+
+    .menu-icon::before,
+    .menu-icon::after {{
+      content: '';
+      position: absolute;
+      width: 100%;
+      height: 2px;
+      background: var(--text);
+      left: 0;
+      transition: transform 0.3s ease;
+    }}
+
+    .menu-icon::before {{ top: -8px; }}
+    .menu-icon::after {{ top: 8px; }}
+
+    .sidebar.mobile-open .menu-icon {{
+      background: transparent;
+    }}
+
+    .sidebar.mobile-open .menu-icon::before {{
+      transform: rotate(45deg) translate(6px, 6px);
+    }}
+
+    .sidebar.mobile-open .menu-icon::after {{
+      transform: rotate(-45deg) translate(6px, -6px);
+    }}
+
+    /* Tablet (768px - 1024px) */
+    @media (max-width: 1024px) {{
+      .layout {{
+        grid-template-columns: 280px 1fr;
+      }}
+
+      .sidebar {{
+        padding: 14px;
+      }}
+
+      .main {{
+        padding: 18px;
+      }}
+
+      .col-3, .col-4, .col-5 {{
+        grid-column: span 6;
+      }}
+
+      .col-7 {{
+        grid-column: span 12;
+      }}
+    }}
+
+    /* Mobile (max-width: 768px) */
+    @media (max-width: 768px) {{
+      .menu-toggle {{
+        display: block;
+      }}
+
+      .layout {{
+        grid-template-columns: 1fr;
+      }}
+
+      .sidebar {{
+        position: fixed;
+        top: 0;
+        left: -100%;
+        width: 280px;
+        height: 100vh;
+        z-index: 999;
+        transition: left 0.3s ease;
+        overflow-y: auto;
+        padding-top: 70px;
+      }}
+
+      .sidebar.mobile-open {{
+        left: 0;
+        box-shadow: 4px 0 20px rgba(0,0,0,0.5);
+      }}
+
+      /* Overlay when sidebar is open */
+      .sidebar.mobile-open::before {{
+        content: '';
+        position: fixed;
+        top: 0;
+        left: 280px;
+        width: calc(100vw - 280px);
+        height: 100vh;
+        background: rgba(0,0,0,0.5);
+        z-index: -1;
+      }}
+
+      .main {{
+        padding: 14px;
+        padding-top: 70px;
+      }}
+
+      .header {{
+        padding: 14px;
+      }}
+
+      .header h1 {{
+        font-size: 18px;
+      }}
+
+      .header .sub {{
+        font-size: 12px;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+      }}
+
+      /* All cards full width on mobile */
+      .col-3, .col-4, .col-5, .col-6, 
+      .col-7, .col-8, .col-12 {{
+        grid-column: span 12;
+      }}
+
+      .grid {{
+        gap: 12px;
+        margin-top: 14px;
+      }}
+
+      .card {{
+        padding: 12px;
+      }}
+
+      .card h3 {{
+        font-size: 13px;
+      }}
+
+      .stat {{
+        padding: 8px 10px;
+      }}
+
+      .stat .k {{
+        font-size: 11px;
+      }}
+
+      .stat .v {{
+        font-size: 16px;
+      }}
+
+      /* Tables - make scrollable */
+      .table-wrapper {{
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        margin: -12px;
+        padding: 12px;
+      }}
+
+      .table {{
+        min-width: 500px;
+      }}
+
+      .table th, .table td {{
+        padding: 8px 8px;
+        font-size: 12px;
+      }}
+
+      /* Brand adjustments */
+      .brand {{
+        padding: 12px;
+      }}
+
+      .brand .title {{
+        font-size: 14px;
+      }}
+
+      .pill {{
+        font-size: 11px;
+        padding: 3px 8px;
+      }}
+
+      /* Channel items */
+      .chan {{
+        padding: 10px;
+      }}
+
+      .chan-name {{
+        font-size: 14px;
+      }}
+
+      .chan-meta {{
+        font-size: 11px;
+      }}
+
+      /* Back link */
+      .back-link {{
+        font-size: 13px;
+        padding: 8px 10px;
+      }}
+    }}
+
+    /* Small mobile (max-width: 480px) */
+    @media (max-width: 480px) {{
+      .sidebar {{
+        width: 100%;
+        left: -100%;
+      }}
+
+      .sidebar.mobile-open::before {{
+        left: 100%;
+        width: 0;
+      }}
+
+      .main {{
+        padding: 12px;
+        padding-top: 60px;
+      }}
+
+      .header {{
+        padding: 12px;
+      }}
+
+      .header h1 {{
+        font-size: 16px;
+      }}
+
+      .grid {{
+        gap: 10px;
+      }}
+
+      .menu-toggle {{
+        top: 12px;
+        left: 12px;
+        padding: 10px;
+      }}
+
+      .stat {{
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }}
+
+      .stat .v {{
+        font-size: 20px;
+      }}
+    }}
   </style>
 </head>
 
@@ -759,7 +1041,7 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
     <aside class="sidebar">
       <div class="brand">
         <div>
-          <div class="title">📊 BlackBoT Stats</div>
+          <div class="title">ðŸ“Š BlackBoT Stats</div>
         </div>
         <div class="pill">UI</div>
       </div>
@@ -777,11 +1059,11 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
       <section class="header">
         <h1>{channel}</h1>
         <div class="sub">
-          <span class="tag">Last activity: {summary.get("last_activity","never")}</span>
-          <span class="tag">Total msgs: {summary.get("total_messages",0):,}</span>
-          <span class="tag">Words: {summary.get("total_words",0):,}</span>
-          <span class="tag">Users: {summary.get("total_users",0):,}</span>
-          <span class="tag">Top talker: {_safe_str(summary.get("top_talker_nick"), "-")} ({_safe_int(summary.get("top_talker_count"),0):,})</span>
+          <span class="tag">Last activity: {summary.get("last_activity", "never")}</span>
+          <span class="tag">Total msgs: {summary.get("total_messages", 0):,}</span>
+          <span class="tag">Words: {summary.get("total_words", 0):,}</span>
+          <span class="tag">Users: {summary.get("total_users", 0):,}</span>
+          <span class="tag">Top talker: {_safe_str(summary.get("top_talker_nick"), "-")} ({_safe_int(summary.get("top_talker_count"), 0):,})</span>
         </div>
       </section>
 
@@ -810,6 +1092,7 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
 
         <div class="card col-8">
           <h3>Top talkers (last 30 days) + last word</h3>
+          <div class="table-wrapper">
           <table class="table" id="talkersTable">
             <thead>
               <tr>
@@ -823,6 +1106,7 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
             </thead>
             <tbody></tbody>
           </table>
+          </div>
         </div>
 
         <div class="card col-4">
@@ -837,6 +1121,7 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
 
         <div class="card col-6">
           <h3>Reply pairs (who replies to whom)</h3>
+          <div class="table-wrapper">
           <table class="table" id="pairsTable">
             <thead>
               <tr>
@@ -848,6 +1133,7 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
             </thead>
             <tbody></tbody>
           </table>
+          </div>
         </div>
       </section>
 
@@ -863,13 +1149,13 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
               return null;
             }}
           }}
-        
+
           function _safeSetSession(key, value) {{
             try {{
               sessionStorage.setItem(key, value);
             }} catch (e) {{}}
           }}
-        
+
           function _restoreScroll(scrollKey) {{
             var saved = _safeGetSession(scrollKey);
             if (saved !== null) {{
@@ -877,32 +1163,32 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
               window.scrollTo(0, y);
             }}
           }}
-        
+
           function _enableScrollSave(scrollKey) {{
             window.addEventListener("scroll", function () {{
               _safeSetSession(scrollKey, String(window.scrollY));
             }}, {{ passive: true }});
           }}
-        
+
           function _enableAutoRefresh(seconds) {{
             setInterval(function () {{
               window.location.reload();
             }}, seconds * 1000);
           }}
-        
+
           (function () {{
             if (AUTO_REFRESH_SECONDS <= 0) {{
               return;
             }}
-        
+
             var scrollKey = "stats_ui_scroll_" + window.location.pathname;
-        
+
             _restoreScroll(scrollKey);
             _enableScrollSave(scrollKey);
             _enableAutoRefresh(AUTO_REFRESH_SECONDS);
           }})();
-                
-        
+
+
         function fmtAgo(ts) {{
           if (!ts) return "never";
           const now = Math.floor(Date.now()/1000);
@@ -1002,13 +1288,13 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
               <td>${{idx+1}}</td>
               <td>
                     <b><a href="/user/${{encodeURIComponent(DATA.channel || window.location.pathname.split('/').pop())}}/${{encodeURIComponent(r.nick)}}" style="color: var(--accent2); text-decoration: none;">${{r.nick}}</a></b>                <div class="muted2" style="margin-top:4px;">
-                  😄 ${{r.smiles}} · 😢 ${{r.sads}} · 😂 ${{r.laughs}} · 😡 ${{r.angries}} · ❤️ ${{r.hearts}}
+                  ðŸ˜„ ${{r.smiles}} Â· ðŸ˜¢ ${{r.sads}} Â· ðŸ˜‚ ${{r.laughs}} Â· ðŸ˜¡ ${{r.angries}} Â· â¤ï¸ ${{r.hearts}}
                 </div>
               </td>
               <td>${{(r.msgs||0).toLocaleString()}}</td>
               <td>${{(r.words||0).toLocaleString()}}</td>
               <td>${{r.last_seen_label || fmtAgo(r.last_seen_ts)}}</td>
-              <td>${{r.last_word ? `<span class="tag">${{r.last_word}}</span>` : `<span class="muted2">—</span>`}}</td>
+              <td>${{r.last_word ? `<span class="tag">${{r.last_word}}</span>` : `<span class="muted2">â€”</span>`}}</td>
             </tr>
           `).join("");
         }})();
@@ -1017,18 +1303,18 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
         (function() {{
           const f = DATA.funny || {{}};
           const items = [
-            ["😄 Smilers", f.smiles],
-            ["😢 Sads", f.sads],
-            ["😂 Laughers", f.laughs],
-            ["😡 Angries", f.angries],
-            ["❤️ Hearts", f.hearts],
-            ["🔊 Caps", f.caps],
-            ["🔗 Links", f.urls],
-            ["❓ Questions", f.questions],
+            ["ðŸ˜„ Smilers", f.smiles],
+            ["ðŸ˜¢ Sads", f.sads],
+            ["ðŸ˜‚ Laughers", f.laughs],
+            ["ðŸ˜¡ Angries", f.angries],
+            ["â¤ï¸ Hearts", f.hearts],
+            ["ðŸ”Š Caps", f.caps],
+            ["ðŸ”— Links", f.urls],
+            ["â“ Questions", f.questions],
         ].filter(([_, arr]) => Array.isArray(arr) && arr.length > 0);
 
           function renderList(arr) {{
-            if (!arr || !arr.length) return '<div class="muted2">—</div>';
+            if (!arr || !arr.length) return '<div class="muted2">â€”</div>';
             return arr.slice(0,5).map((x,i) => `
               <div class="stat" style="margin-top:8px;">
                 <div class="k">${{i+1}}. <a href="/user/${{encodeURIComponent(DATA.channel || window.location.pathname.split('/').pop())}}/${{encodeURIComponent(x.nick)}}" style="color: var(--accent2); text-decoration: none;">${{x.nick}}</a></div>                <div class="v" style="font-size:16px;">${{(x.count||0).toLocaleString()}}</div>
@@ -1055,15 +1341,15 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
                 return `
                   <div class="record">
                     <b>${{title}}</b>
-                    <div class="muted2" style="margin-top:6px;">—</div>
+                    <div class="muted2" style="margin-top:6px;">â€”</div>
                   </div>
                 `;
               }}
-            
+
               let meta = "";
               let line = "";
               const channelPath = DATA.channel || window.location.pathname.split('/').pop();
-            
+
               if (kind === "longest") {{
                 const nickLink = obj.nick
                   ? `<a href="/user/${{encodeURIComponent(channelPath)}}/${{encodeURIComponent(obj.nick)}}"
@@ -1071,13 +1357,13 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
                         ${{obj.nick}}
                      </a>`
                   : "-";
-            
+
                 meta = `
                   <span class="tag">${{obj.chars}} chars</span>
                   <span class="tag">${{nickLink}}</span>
                   <span class="tag">${{fmtAgo(obj.ts)}}</span>
                 `;
-            
+
                 line = obj.message
                   ? `<div class="line">${{obj.message}}</div>`
                   : "";
@@ -1089,14 +1375,14 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
                         ${{obj.nick}}
                      </a>`
                   : "-";
-            
+
                 meta = `
                   <span class="tag">${{obj.count}} emojis</span>
                   <span class="tag">${{nickLink}}</span>
                   <span class="tag">${{fmtAgo(obj.ts)}}</span>
                 `;
               }}
-            
+
               return `
                 <div class="record">
                   <b>${{title}}</b>
@@ -1107,9 +1393,9 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
             }}
 
           box.innerHTML =
-            recCard("📏 Longest line", r.longest, "longest") +
-            recCard("😂 Most emojis in one line", r.most_emojis, "emoji") +
-            recCard("💥 Peak minute", r.peak_minute, "peak");
+            recCard("ðŸ“ Longest line", r.longest, "longest") +
+            recCard("ðŸ˜‚ Most emojis in one line", r.most_emojis, "emoji") +
+            recCard("ðŸ’¥ Peak minute", r.peak_minute, "peak");
         }})();
 
         // Reply pairs
@@ -1132,6 +1418,41 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
       </script>
     </main>
   </div>
+
+  <script>
+    // Mobile menu toggle
+    (function() {{
+      const sidebar = document.querySelector('.sidebar');
+
+      // Create menu toggle button
+      const menuToggle = document.createElement('button');
+      menuToggle.className = 'menu-toggle';
+      menuToggle.innerHTML = '<span class="menu-icon"></span>';
+      menuToggle.setAttribute('aria-label', 'Toggle menu');
+
+      document.body.appendChild(menuToggle);
+
+      // Toggle sidebar on mobile
+      menuToggle.addEventListener('click', function() {{
+        sidebar.classList.toggle('mobile-open');
+      }});
+
+      // Close sidebar when clicking outside (on overlay)
+      sidebar.addEventListener('click', function(e) {{
+        if (e.target === sidebar && sidebar.classList.contains('mobile-open')) {{
+          sidebar.classList.remove('mobile-open');
+        }}
+      }});
+
+      // Close sidebar when selecting a channel
+      const channelLinks = document.querySelectorAll('.chan');
+      channelLinks.forEach(function(link) {{
+        link.addEventListener('click', function() {{
+          sidebar.classList.remove('mobile-open');
+        }});
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -1335,13 +1656,314 @@ async def user_analytics_page(
                         color: #7c5cff;
                         text-decoration: none;
                     }}
-                </style>
+
+    /* ========================================= */
+    /* RESPONSIVE DESIGN - Mobile & Tablet      */
+    /* ========================================= */
+
+    /* Hamburger menu button (hidden on desktop) */
+    .menu-toggle {{
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 1000;
+      background: var(--panel);
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      padding: 12px;
+      cursor: pointer;
+      backdrop-filter: blur(12px);
+    }}
+
+    .menu-toggle:hover {{
+      background: var(--panel2);
+    }}
+
+    .menu-icon {{
+      width: 24px;
+      height: 2px;
+      background: var(--text);
+      display: block;
+      position: relative;
+    }}
+
+    .menu-icon::before,
+    .menu-icon::after {{
+      content: '';
+      position: absolute;
+      width: 100%;
+      height: 2px;
+      background: var(--text);
+      left: 0;
+      transition: transform 0.3s ease;
+    }}
+
+    .menu-icon::before {{ top: -8px; }}
+    .menu-icon::after {{ top: 8px; }}
+
+    .sidebar.mobile-open .menu-icon {{
+      background: transparent;
+    }}
+
+    .sidebar.mobile-open .menu-icon::before {{
+      transform: rotate(45deg) translate(6px, 6px);
+    }}
+
+    .sidebar.mobile-open .menu-icon::after {{
+      transform: rotate(-45deg) translate(6px, -6px);
+    }}
+
+    /* Tablet (768px - 1024px) */
+    @media (max-width: 1024px) {{
+      .layout {{
+        grid-template-columns: 280px 1fr;
+      }}
+
+      .sidebar {{
+        padding: 14px;
+      }}
+
+      .main {{
+        padding: 18px;
+      }}
+
+      .col-3, .col-4, .col-5 {{
+        grid-column: span 6;
+      }}
+
+      .col-7 {{
+        grid-column: span 12;
+      }}
+    }}
+
+    /* Mobile (max-width: 768px) */
+    @media (max-width: 768px) {{
+      .menu-toggle {{
+        display: block;
+      }}
+
+      .layout {{
+        grid-template-columns: 1fr;
+      }}
+
+      .sidebar {{
+        position: fixed;
+        top: 0;
+        left: -100%;
+        width: 280px;
+        height: 100vh;
+        z-index: 999;
+        transition: left 0.3s ease;
+        overflow-y: auto;
+        padding-top: 70px;
+      }}
+
+      .sidebar.mobile-open {{
+        left: 0;
+        box-shadow: 4px 0 20px rgba(0,0,0,0.5);
+      }}
+
+      /* Overlay when sidebar is open */
+      .sidebar.mobile-open::before {{
+        content: '';
+        position: fixed;
+        top: 0;
+        left: 280px;
+        width: calc(100vw - 280px);
+        height: 100vh;
+        background: rgba(0,0,0,0.5);
+        z-index: -1;
+      }}
+
+      .main {{
+        padding: 14px;
+        padding-top: 70px;
+      }}
+
+      .header {{
+        padding: 14px;
+      }}
+
+      .header h1 {{
+        font-size: 18px;
+      }}
+
+      .header .sub {{
+        font-size: 12px;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+      }}
+
+      /* All cards full width on mobile */
+      .col-3, .col-4, .col-5, .col-6, 
+      .col-7, .col-8, .col-12 {{
+        grid-column: span 12;
+      }}
+
+      .grid {{
+        gap: 12px;
+        margin-top: 14px;
+      }}
+
+      .card {{
+        padding: 12px;
+      }}
+
+      .card h3 {{
+        font-size: 13px;
+      }}
+
+      .stat {{
+        padding: 8px 10px;
+      }}
+
+      .stat .k {{
+        font-size: 11px;
+      }}
+
+      .stat .v {{
+        font-size: 16px;
+      }}
+
+      /* Tables - make scrollable */
+      .table-wrapper {{
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        margin: -12px;
+        padding: 12px;
+      }}
+
+      .table {{
+        min-width: 500px;
+      }}
+
+      .table th, .table td {{
+        padding: 8px 8px;
+        font-size: 12px;
+      }}
+
+      /* Brand adjustments */
+      .brand {{
+        padding: 12px;
+      }}
+
+      .brand .title {{
+        font-size: 14px;
+      }}
+
+      .pill {{
+        font-size: 11px;
+        padding: 3px 8px;
+      }}
+
+      /* Channel items */
+      .chan {{
+        padding: 10px;
+      }}
+
+      .chan-name {{
+        font-size: 14px;
+      }}
+
+      .chan-meta {{
+        font-size: 11px;
+      }}
+
+      /* Back link */
+      .back-link {{
+        font-size: 13px;
+        padding: 8px 10px;
+      }}
+    }}
+
+    /* Small mobile (max-width: 480px) */
+    @media (max-width: 480px) {{
+      .sidebar {{
+        width: 100%;
+        left: -100%;
+      }}
+
+      .sidebar.mobile-open::before {{
+        left: 100%;
+        width: 0;
+      }}
+
+      .main {{
+        padding: 12px;
+        padding-top: 60px;
+      }}
+
+      .header {{
+        padding: 12px;
+      }}
+
+      .header h1 {{
+        font-size: 16px;
+      }}
+
+      .grid {{
+        gap: 10px;
+      }}
+
+      .menu-toggle {{
+        top: 12px;
+        left: 12px;
+        padding: 10px;
+      }}
+
+      .stat {{
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }}
+
+      .stat .v {{
+        font-size: 20px;
+      }}
+    }}
+  </style>
             </head>
             <body>
-                <h1>❌ No Data Found</h1>
+                <h1>âŒ No Data Found</h1>
                 <p>User <strong>{nick}</strong> not found in <strong>{channel}</strong></p>
-                <p><a href="/ui/{channel.lstrip('#')}">← Back to {channel}</a></p>
-            </body>
+                <p><a href="/ui/{channel.lstrip('#')}">â† Back to {channel}</a></p>
+
+  <script>
+    // Mobile menu toggle
+    (function() {{
+      const sidebar = document.querySelector('.sidebar');
+
+      // Create menu toggle button
+      const menuToggle = document.createElement('button');
+      menuToggle.className = 'menu-toggle';
+      menuToggle.innerHTML = '<span class="menu-icon"></span>';
+      menuToggle.setAttribute('aria-label', 'Toggle menu');
+
+      document.body.appendChild(menuToggle);
+
+      // Toggle sidebar on mobile
+      menuToggle.addEventListener('click', function() {{
+        sidebar.classList.toggle('mobile-open');
+      }});
+
+      // Close sidebar when clicking outside (on overlay)
+      sidebar.addEventListener('click', function(e) {{
+        if (e.target === sidebar && sidebar.classList.contains('mobile-open')) {{
+          sidebar.classList.remove('mobile-open');
+        }}
+      }});
+
+      // Close sidebar when selecting a channel
+      const channelLinks = document.querySelectorAll('.chan');
+      channelLinks.forEach(function(link) {{
+        link.addEventListener('click', function() {{
+          sidebar.classList.remove('mobile-open');
+        }});
+      }});
+    }})();
+  </script>
+</body>
             </html>
             """)
 
@@ -1353,7 +1975,7 @@ async def user_analytics_page(
             sidebar_items.append(f"""
                 <a class="chan" href="{url}">
                     <div class="chan-name">{ch['channel']}</div>
-                    <div class="chan-meta">{ch['messages']:,} msgs · {ch['users']} users</div>
+                    <div class="chan-meta">{ch['messages']:,} msgs Â· {ch['users']} users</div>
                 </a>
             """)
         sidebar_html = "\n".join(sidebar_items) if sidebar_items else "<div class='empty'>No channels yet</div>"
@@ -1634,6 +2256,272 @@ async def user_analytics_page(
       .layout {{ grid-template-columns: 1fr; }}
       .sidebar {{ border-right: none; border-bottom: 1px solid var(--stroke); }}
     }}
+
+    /* ========================================= */
+    /* RESPONSIVE DESIGN - Mobile & Tablet      */
+    /* ========================================= */
+
+    /* Hamburger menu button (hidden on desktop) */
+    .menu-toggle {{
+      display: none;
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      z-index: 1000;
+      background: var(--panel);
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      padding: 12px;
+      cursor: pointer;
+      backdrop-filter: blur(12px);
+    }}
+
+    .menu-toggle:hover {{
+      background: var(--panel2);
+    }}
+
+    .menu-icon {{
+      width: 24px;
+      height: 2px;
+      background: var(--text);
+      display: block;
+      position: relative;
+    }}
+
+    .menu-icon::before,
+    .menu-icon::after {{
+      content: '';
+      position: absolute;
+      width: 100%;
+      height: 2px;
+      background: var(--text);
+      left: 0;
+      transition: transform 0.3s ease;
+    }}
+
+    .menu-icon::before {{ top: -8px; }}
+    .menu-icon::after {{ top: 8px; }}
+
+    .sidebar.mobile-open .menu-icon {{
+      background: transparent;
+    }}
+
+    .sidebar.mobile-open .menu-icon::before {{
+      transform: rotate(45deg) translate(6px, 6px);
+    }}
+
+    .sidebar.mobile-open .menu-icon::after {{
+      transform: rotate(-45deg) translate(6px, -6px);
+    }}
+
+    /* Tablet (768px - 1024px) */
+    @media (max-width: 1024px) {{
+      .layout {{
+        grid-template-columns: 280px 1fr;
+      }}
+
+      .sidebar {{
+        padding: 14px;
+      }}
+
+      .main {{
+        padding: 18px;
+      }}
+
+      .col-3, .col-4, .col-5 {{
+        grid-column: span 6;
+      }}
+
+      .col-7 {{
+        grid-column: span 12;
+      }}
+    }}
+
+    /* Mobile (max-width: 768px) */
+    @media (max-width: 768px) {{
+      .menu-toggle {{
+        display: block;
+      }}
+
+      .layout {{
+        grid-template-columns: 1fr;
+      }}
+
+      .sidebar {{
+        position: fixed;
+        top: 0;
+        left: -100%;
+        width: 280px;
+        height: 100vh;
+        z-index: 999;
+        transition: left 0.3s ease;
+        overflow-y: auto;
+        padding-top: 70px;
+      }}
+
+      .sidebar.mobile-open {{
+        left: 0;
+        box-shadow: 4px 0 20px rgba(0,0,0,0.5);
+      }}
+
+      /* Overlay when sidebar is open */
+      .sidebar.mobile-open::before {{
+        content: '';
+        position: fixed;
+        top: 0;
+        left: 280px;
+        width: calc(100vw - 280px);
+        height: 100vh;
+        background: rgba(0,0,0,0.5);
+        z-index: -1;
+      }}
+
+      .main {{
+        padding: 14px;
+        padding-top: 70px;
+      }}
+
+      .header {{
+        padding: 14px;
+      }}
+
+      .header h1 {{
+        font-size: 18px;
+      }}
+
+      .header .sub {{
+        font-size: 12px;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+      }}
+
+      /* All cards full width on mobile */
+      .col-3, .col-4, .col-5, .col-6, 
+      .col-7, .col-8, .col-12 {{
+        grid-column: span 12;
+      }}
+
+      .grid {{
+        gap: 12px;
+        margin-top: 14px;
+      }}
+
+      .card {{
+        padding: 12px;
+      }}
+
+      .card h3 {{
+        font-size: 13px;
+      }}
+
+      .stat {{
+        padding: 8px 10px;
+      }}
+
+      .stat .k {{
+        font-size: 11px;
+      }}
+
+      .stat .v {{
+        font-size: 16px;
+      }}
+
+      /* Tables - make scrollable */
+      .table-wrapper {{
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        margin: -12px;
+        padding: 12px;
+      }}
+
+      .table {{
+        min-width: 500px;
+      }}
+
+      .table th, .table td {{
+        padding: 8px 8px;
+        font-size: 12px;
+      }}
+
+      /* Brand adjustments */
+      .brand {{
+        padding: 12px;
+      }}
+
+      .brand .title {{
+        font-size: 14px;
+      }}
+
+      .pill {{
+        font-size: 11px;
+        padding: 3px 8px;
+      }}
+
+      /* Channel items */
+      .chan {{
+        padding: 10px;
+      }}
+
+      .chan-name {{
+        font-size: 14px;
+      }}
+
+      .chan-meta {{
+        font-size: 11px;
+      }}
+
+      /* Back link */
+      .back-link {{
+        font-size: 13px;
+        padding: 8px 10px;
+      }}
+    }}
+
+    /* Small mobile (max-width: 480px) */
+    @media (max-width: 480px) {{
+      .sidebar {{
+        width: 100%;
+        left: -100%;
+      }}
+
+      .sidebar.mobile-open::before {{
+        left: 100%;
+        width: 0;
+      }}
+
+      .main {{
+        padding: 12px;
+        padding-top: 60px;
+      }}
+
+      .header {{
+        padding: 12px;
+      }}
+
+      .header h1 {{
+        font-size: 16px;
+      }}
+
+      .grid {{
+        gap: 10px;
+      }}
+
+      .menu-toggle {{
+        top: 12px;
+        left: 12px;
+        padding: 10px;
+      }}
+
+      .stat {{
+        grid-template-columns: 1fr;
+        gap: 4px;
+      }}
+
+      .stat .v {{
+        font-size: 20px;
+      }}
+    }}
   </style>
 </head>
 
@@ -1642,7 +2530,7 @@ async def user_analytics_page(
     <aside class="sidebar">
       <div class="brand">
         <div>
-          <div class="title">📊 BlackBoT Stats</div>
+          <div class="title">ðŸ“Š BlackBoT Stats</div>
         </div>
         <div class="pill">USER</div>
       </div>
@@ -1658,12 +2546,12 @@ async def user_analytics_page(
 
     <main class="main">
       <a href="/ui/{channel.lstrip('#')}" class="back-link">
-        ← Back to {channel}
+        â† Back to {channel}
       </a>
 
       <section class="header">
         <h1>
-          👤 {nick}
+          ðŸ‘¤ {nick}
           <span class="sentiment-badge">
             {profile['sentiment']['overall_sentiment'].upper()}
           </span>
@@ -1720,7 +2608,7 @@ async def user_analytics_page(
         <!-- Top Conversation Partners -->
         <div class="card col-12">
           <h3>Top Conversation Partners</h3>
-          <table class="table">
+          <div class="table-wrapper"><table class="table">
             <thead>
               <tr>
                 <th>#</th>
@@ -1743,7 +2631,7 @@ async def user_analytics_page(
               </tr>
               ''' for i, p in enumerate(profile['social']['top_conversation_partners']))}
             </tbody>
-          </table>
+          </table></div>
         </div>
       </section>
 
@@ -1808,6 +2696,41 @@ async def user_analytics_page(
       </script>
     </main>
   </div>
+
+  <script>
+    // Mobile menu toggle
+    (function() {{
+      const sidebar = document.querySelector('.sidebar');
+
+      // Create menu toggle button
+      const menuToggle = document.createElement('button');
+      menuToggle.className = 'menu-toggle';
+      menuToggle.innerHTML = '<span class="menu-icon"></span>';
+      menuToggle.setAttribute('aria-label', 'Toggle menu');
+
+      document.body.appendChild(menuToggle);
+
+      // Toggle sidebar on mobile
+      menuToggle.addEventListener('click', function() {{
+        sidebar.classList.toggle('mobile-open');
+      }});
+
+      // Close sidebar when clicking outside (on overlay)
+      sidebar.addEventListener('click', function(e) {{
+        if (e.target === sidebar && sidebar.classList.contains('mobile-open')) {{
+          sidebar.classList.remove('mobile-open');
+        }}
+      }});
+
+      // Close sidebar when selecting a channel
+      const channelLinks = document.querySelectorAll('.chan');
+      channelLinks.forEach(function(link) {{
+        link.addEventListener('click', function() {{
+          sidebar.classList.remove('mobile-open');
+        }});
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -1816,4 +2739,3 @@ async def user_analytics_page(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
