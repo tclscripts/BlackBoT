@@ -568,7 +568,7 @@ class StatsAggregator:
             bot_id = int(e["botId"])
             channel = str(e["channel"])
 
-            for w in self._extract_words(msg):
+            for w in _extract_words(msg):
                 counts[(bot_id, channel, date_str, w)] += 1
 
         if not counts:
