@@ -838,14 +838,61 @@ def cmd_status(self, channel, feedback, nick, host, msg):
     try:
         peers = []
         dcc_sessions = {}
+        dcc_port = "?"
+        dcc_ip = "?"
+        stats_url = ""
+
         if hasattr(self, "dcc"):
             peers = sorted(list(self.dcc.list_link_peers()))
             dcc_sessions = self.dcc.list_sessions()
+
+            # Get DCC port and IP
+            if hasattr(self.dcc, 'fixed_port') and self.dcc.fixed_port:
+                dcc_port = str(self.dcc.fixed_port)
+            elif hasattr(self.dcc, 'port_min') and hasattr(self.dcc, 'port_max'):
+                dcc_port = f"{self.dcc.port_min}-{self.dcc.port_max}"
+
+            if hasattr(self.dcc, 'public_ip'):
+                dcc_ip = self.dcc.public_ip
+
+        # Get Stats API URL
+        try:
+            from core.environment_config import config
+            stats_enabled = getattr(config, 'stats_api_enabled', False)
+
+            if stats_enabled:
+                stats_host = getattr(config, 'stats_api_host', '0.0.0.0')
+                stats_port = getattr(config, 'stats_api_port', 8000)
+
+                # Determine display IP
+                if stats_host in ('0.0.0.0', '::'):
+                    display_ip = dcc_ip if dcc_ip != '?' else 'localhost'
+                elif stats_host == '127.0.0.1':
+                    display_ip = 'localhost'
+                else:
+                    display_ip = stats_host
+
+                # Build Stats URL
+                stats_url = f" | 🌐 Stats UI: http://{display_ip}:{stats_port}/ui"
+        except Exception:
+            pass
+
         peers_cnt = len(peers)
         open_cnt = sum(1 for s in dcc_sessions.values() if s.get("state") == "open")
-        botlink_line = f"🔗 BotLink: {peers_cnt} peers ({open_cnt} open)"
-    except Exception:
-        botlink_line = None
+
+        # Build complete line with DCC and Stats UI
+        botlink_line = f"🔗 BotLink: {peers_cnt} peers ({open_cnt} open) | 🔌 DCC: {dcc_ip}:{dcc_port}{stats_url}"
+    except Exception as e:
+        # Fallback
+        try:
+            if hasattr(self, "dcc"):
+                dcc_port = getattr(self.dcc, 'fixed_port', '?')
+                dcc_ip = getattr(self.dcc, 'public_ip', '?')
+                botlink_line = f"🔗 BotLink: ? | 🔌 DCC: {dcc_ip}:{dcc_port}"
+            else:
+                botlink_line = f"🔗 BotLink: ? | 🔌 DCC: disabled"
+        except:
+            botlink_line = None
 
     # ─────────── Cache Statistics (NEW!) ───────────
     cache_lines = []
