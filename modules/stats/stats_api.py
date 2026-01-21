@@ -823,9 +823,6 @@ async def web_ui(channel: str = Path(..., description="Channel name (with or wit
             </thead>
             <tbody></tbody>
           </table>
-          <div class="muted2" style="margin-top:10px; font-size:12px;">
-            Tip: “last word” vine din STATS_LAST_SPOKEN și se actualizează la agregare.
-          </div>
         </div>
 
         <div class="card col-4">

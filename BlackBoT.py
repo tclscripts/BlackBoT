@@ -779,12 +779,34 @@ class Bot(irc.IRCClient):
                 del self.user_cache[k]
 
     def userQuit(self, user, quitMessage):
-        nick = user.split('!')[0]
+        nick = user.split('!', 1)[0] if user else ""
         logger.info(f"⬅️ QUIT: {nick} ({quitMessage})")
 
         # Logica SEEN
         if hasattr(seen, 'on_quit'):
-            seen.on_quit(self.sql, self.botId, user)
+            try:
+                ident = None
+                host = None
+
+                if user and '!' in user and '@' in user:
+                    try:
+                        ident, host = user.split('!', 1)[1].split('@', 1)
+                    except Exception:
+                        ident, host = None, None
+
+                # SEMNĂTURA CORECTĂ:
+                # on_quit(sql, bot_id, nick, message, ident=None, host=None)
+                seen.on_quit(
+                    self.sql,
+                    self.botId,
+                    nick,
+                    quitMessage,
+                    ident=ident,
+                    host=host
+                )
+            except Exception:
+                # seen nu trebuie să poată crăpa botul
+                pass
 
         # 🧹 CURĂȚENIE GENERALĂ
         self._clean_user_memory(nick, is_quit=True)
