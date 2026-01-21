@@ -504,6 +504,26 @@ class StatsAggregator:
 
         return daily
 
+    # -----------------------------------------------------------------------------
+    # Helpers for word aggregation
+    # -----------------------------------------------------------------------------
+
+    def _extract_words(message: str) -> list[str]:
+        _WORD_RE = re.compile(r"[A-Za-z0-9_']{2,}")
+        """Extract words for STATS_WORDS_DAILY aggregation."""
+        if not message:
+            return []
+        msg = str(message).strip().lower()
+        if not msg:
+            return []
+        words = _WORD_RE.findall(msg)
+        out = []
+        for w in words:
+            if w.isdigit():
+                continue
+            out.append(w)
+        return out
+
     # =========================================================================
     # NEW: WORDS DAILY
     # =========================================================================
