@@ -848,9 +848,46 @@ def cmd_status(self, channel, feedback, nick, host, msg):
 
             # Get DCC port and IP
             if hasattr(self.dcc, 'fixed_port') and self.dcc.fixed_port:
+                # fixed listener -> port clar
                 dcc_port = str(self.dcc.fixed_port)
-            elif hasattr(self.dcc, 'port_min') and hasattr(self.dcc, 'port_max'):
-                dcc_port = f"{self.dcc.port_min}-{self.dcc.port_max}"
+            else:
+                # ephemeral: încearcă să afișezi portul/porturile reale din sesiunile curente
+                ports = set()
+                try:
+                    for s in (getattr(self.dcc, "sessions", {}) or {}).values():
+                        if not s:
+                            continue
+                        p = None
+                        try:
+                            p = (getattr(s, "meta", {}) or {}).get("port")
+                        except Exception:
+                            p = None
+
+                        # port relevant dacă există o ofertă outbound / listener în așteptare / sesiune deschisă
+                        if p and (
+                                getattr(s, "outbound_offer", False)
+                                or getattr(s, "listening_port", None) is not None
+                                or getattr(s, "transport", None) is not None
+                        ):
+                            ports.add(str(p))
+                except Exception:
+                    pass
+
+                if ports:
+                    # dacă sunt mai multe, le arătăm compact
+                    ports_sorted = sorted(ports, key=lambda x: int(x) if x.isdigit() else x)
+                    if len(ports_sorted) <= 3:
+                        dcc_port = ",".join(ports_sorted)
+                    else:
+                        # multe porturi -> min-max + count
+                        nums = [int(x) for x in ports_sorted if x.isdigit()]
+                        if nums:
+                            dcc_port = f"{min(nums)}-{max(nums)} ({len(ports_sorted)} ports)"
+                        else:
+                            dcc_port = f"{ports_sorted[0]}... ({len(ports_sorted)} ports)"
+                elif hasattr(self.dcc, 'port_min') and hasattr(self.dcc, 'port_max'):
+                    # fallback: dacă nu avem nicio sesiune, arătăm range-ul
+                    dcc_port = f"{self.dcc.port_min}-{self.dcc.port_max}"
 
             if hasattr(self.dcc, 'public_ip'):
                 dcc_ip = self.dcc.public_ip
