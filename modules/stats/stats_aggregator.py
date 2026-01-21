@@ -508,7 +508,7 @@ class StatsAggregator:
     # Helpers for word aggregation
     # -----------------------------------------------------------------------------
 
-    def _extract_words(message: str) -> list[str]:
+    def _extract_words(self, message: str) -> list[str]:
         _WORD_RE = re.compile(r"[A-Za-z0-9_']{2,}")
         """Extract words for STATS_WORDS_DAILY aggregation."""
         if not message:
@@ -550,7 +550,7 @@ class StatsAggregator:
             bot_id = int(e["botId"])
             channel = str(e["channel"])
 
-            for w in _extract_words(msg):
+            for w in self._extract_words(msg):
                 counts[(bot_id, channel, date_str, w)] += 1
 
         if not counts:
@@ -575,6 +575,23 @@ class StatsAggregator:
         """
         Populează STATS_LAST_SPOKEN (ultimul mesaj + ultimul cuvânt).
         """
+
+        def _last_line_preview(message: str, max_words: int = 5) -> str:
+            """
+            Returnează primele max_words cuvinte din mesaj + '...' dacă e mai lung.
+            """
+            if not message:
+                return ""
+
+            msg = message.strip()
+            if not msg:
+                return ""
+
+            words = re.split(r"\s+", msg)
+            if len(words) <= max_words:
+                return msg
+
+            return " ".join(words[:max_words]) + "..."
         if not events:
             return
 
@@ -593,7 +610,7 @@ class StatsAggregator:
 
             key = (int(e["botId"]), str(e["channel"]), str(e["nick"]))
             ts = int(e["ts"])
-            lw = _last_word(msg)
+            lw = _last_line_preview(msg)
 
             cur = latest.get(key)
             if (cur is None) or (ts >= cur[0]):
