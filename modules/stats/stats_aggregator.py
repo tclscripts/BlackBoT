@@ -101,6 +101,42 @@ def _count_emotions(message: str | None, config: AggregatorConfig) -> dict:
         "hearts": len(config.heart_re.findall(message)),
     }
 
+_WORD_RE = re.compile(r"[A-Za-z0-9_']{2,}")
+
+def _extract_words(message: str) -> list[str]:
+    """Extract words for STATS_WORDS_DAILY aggregation."""
+    if not message:
+        return []
+    msg = str(message).strip().lower()
+    if not msg:
+        return []
+    words = _WORD_RE.findall(msg)
+    out = []
+    for w in words:
+        if w.isdigit():
+            continue
+        out.append(w)
+    return out
+
+# -----------------------------------------------------------------------------
+# Helpers for emoji counting (used by records)
+# -----------------------------------------------------------------------------
+
+_EMOJI_RE = re.compile(
+    "["  # common emoji ranges
+    "\U0001F300-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "]",
+    flags=re.UNICODE
+)
+
+def _count_emojis(message: str) -> int:
+    """Count emojis in message (rough but fast)."""
+    if not message:
+        return 0
+    return len(_EMOJI_RE.findall(str(message)))
+
+
 
 # =============================================================================
 # Thread-Safe Stats Aggregator
@@ -504,25 +540,7 @@ class StatsAggregator:
 
         return daily
 
-    # -----------------------------------------------------------------------------
-    # Helpers for word aggregation
-    # -----------------------------------------------------------------------------
 
-    def _extract_words(self, message: str) -> list[str]:
-        _WORD_RE = re.compile(r"[A-Za-z0-9_']{2,}")
-        """Extract words for STATS_WORDS_DAILY aggregation."""
-        if not message:
-            return []
-        msg = str(message).strip().lower()
-        if not msg:
-            return []
-        words = _WORD_RE.findall(msg)
-        out = []
-        for w in words:
-            if w.isdigit():
-                continue
-            out.append(w)
-        return out
 
     # =========================================================================
     # NEW: WORDS DAILY
@@ -644,6 +662,7 @@ class StatsAggregator:
         """
         if not events:
             return
+
 
         # 1) candidate records per (botId, channel)
         best_longest: Dict[Tuple[int, str], Tuple[int, str, int, str]] = {}
