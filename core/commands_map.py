@@ -240,5 +240,17 @@ command_definitions = [
     ),
     'flags': '-',  # Public command (anyone can use)
     'id': '41'  # Adjust ID based on last ID in your commands_map.py
-}
+},
+{
+        'name': 'weather',
+        'description': 'Weather check.\nUsage: !weather <city> OR !weather city <city> to save.',
+        'flags': '-',
+        'id': '42'
+    },
+    {
+        'name': 'w',
+        'description': 'Short alias for weather.\nUsage: !w <city>',
+        'flags': '-',
+        'id': '42' # Același ID ca weather, e doar un alias
+    }
 ]

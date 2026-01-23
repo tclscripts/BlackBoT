@@ -130,8 +130,7 @@ class ThreadWorker(threading.Thread):
         try:
             ev = thread_stop_events.get(self.name)
             if ev is None:
-                # Reload safety: recreate instead of stopping
-                logger.warning("Thread '%s' not registered in stop events (reload-safe recreate)", self.name)
+                # Reload safety: recreate event silently
                 ev = threading.Event()
                 thread_stop_events[self.name] = ev
             return ev.is_set()
@@ -247,7 +246,7 @@ class ThreadWorker(threading.Thread):
                     get_event(self.name).set()
                     self._child.join(timeout=2.0)
                     if self._child.is_alive():
-                        logger.warning("Child thread '%s' did not stop gracefully", self._child.name)
+                        logger.debug("Child thread '%s' did not stop gracefully", self._child.name)
                 except Exception as e:
                     logger.error("Error stopping child thread: %s", e)
 

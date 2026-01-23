@@ -2637,7 +2637,8 @@ class Bot(irc.IRCClient):
                 'core.ban_expiration_manager',
                 'core.dcc_log_handler',
                 'core.nettools',
-                'core.threading_utils'
+                'core.threading_utils',
+                'modules.weather'
             ]
             for mod_name in modules_to_reload:
                 if mod_name in sys.modules:
@@ -2929,6 +2930,7 @@ class BotFactory(protocol.ReconnectingClientFactory):
         self.maxDelay = 60.0
         self.factor = 1.5
         self.jitter = 0.1
+        self.shutting_down = False
 
     def buildProtocol(self, addr):
         global current_instance

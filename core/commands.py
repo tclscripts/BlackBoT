@@ -813,7 +813,6 @@ def cmd_status(self, channel, feedback, nick, host, msg):
     net_up = net_io.bytes_sent / (1024 ** 2)
     net_down = net_io.bytes_recv / (1024 ** 2)
 
-    # Load Avg cross-platform
     load_line = ""
     try:
         if hasattr(os, "getloadavg"):
@@ -825,7 +824,6 @@ def cmd_status(self, channel, feedback, nick, host, msg):
     except Exception:
         pass
 
-    # combinăm totul pe o singură linie:
     system_line = (
         f"🧠 RAM: {rss_mb:.2f}MB / {total_mem_mb:.0f}MB | "
         f"🔄 CPU: {cpu_percent:.1f}% | "
@@ -848,15 +846,11 @@ def cmd_status(self, channel, feedback, nick, host, msg):
 
             # Get DCC port and IP
             if hasattr(self.dcc, 'fixed_port') and self.dcc.fixed_port:
-                # fixed listener -> port clar
                 dcc_port = str(self.dcc.fixed_port)
             else:
-                # ephemeral: afișăm portul activ dacă există
                 if hasattr(self.dcc, 'active_ephemeral_port') and self.dcc.active_ephemeral_port:
-                    # Avem un port ephemeral activ ales
                     dcc_port = str(self.dcc.active_ephemeral_port)
                 else:
-                    # încercăm să aflăm portul din sesiunile active
                     ports = set()
                     try:
                         for s in (getattr(self.dcc, "sessions", {}) or {}).values():
@@ -868,26 +862,22 @@ def cmd_status(self, channel, feedback, nick, host, msg):
                             except Exception:
                                 p = None
 
-                            # port relevant dacă există o ofertă outbound / listener în așteptare / sesiune deschisă
                             if p and (
-                                    getattr(s, "outbound_offer", False)
-                                    or getattr(s, "listening_port", None) is not None
-                                    or getattr(s, "transport", None) is not None
+                                getattr(s, "outbound_offer", False)
+                                or getattr(s, "listening_port", None) is not None
+                                or getattr(s, "transport", None) is not None
                             ):
                                 ports.add(str(p))
                     except Exception:
                         pass
 
                     if ports:
-                        # dacă sunt mai multe, le arătăm compact
                         ports_sorted = sorted(ports, key=lambda x: int(x) if x.isdigit() else x)
                         if len(ports_sorted) <= 3:
                             dcc_port = ",".join(ports_sorted)
                         else:
-                            # multe porturi -> arătăm primul și numărul total
                             dcc_port = f"{ports_sorted[0]} (+{len(ports_sorted) - 1} more)"
                     elif hasattr(self.dcc, 'port_min') and hasattr(self.dcc, 'port_max'):
-                        # fallback: dacă nu avem niciun port activ, arătăm că va fi din range
                         dcc_port = f"ready ({self.dcc.port_min}-{self.dcc.port_max})"
 
             if hasattr(self.dcc, 'public_ip'):
@@ -902,7 +892,6 @@ def cmd_status(self, channel, feedback, nick, host, msg):
                 stats_host = getattr(config, 'stats_api_host', '0.0.0.0')
                 stats_port = getattr(config, 'stats_api_port', 8000)
 
-                # Determine display IP
                 if stats_host in ('0.0.0.0', '::'):
                     display_ip = dcc_ip if dcc_ip != '?' else 'localhost'
                 elif stats_host == '127.0.0.1':
@@ -910,7 +899,6 @@ def cmd_status(self, channel, feedback, nick, host, msg):
                 else:
                     display_ip = stats_host
 
-                # Build Stats URL
                 stats_url = f" | 🌐 Stats UI: http://{display_ip}:{stats_port}/ui"
         except Exception:
             pass
@@ -918,10 +906,8 @@ def cmd_status(self, channel, feedback, nick, host, msg):
         peers_cnt = len(peers)
         open_cnt = sum(1 for s in dcc_sessions.values() if s.get("state") == "open")
 
-        # Build complete line with DCC and Stats UI
         botlink_line = f"🔗 BotLink: {peers_cnt} peers ({open_cnt} open) | 🔌 DCC: {dcc_ip}:{dcc_port}{stats_url}"
-    except Exception as e:
-        # Fallback
+    except Exception:
         try:
             if hasattr(self, "dcc"):
                 dcc_port = getattr(self.dcc, 'fixed_port', '?')
@@ -929,19 +915,17 @@ def cmd_status(self, channel, feedback, nick, host, msg):
                 botlink_line = f"🔗 BotLink: ? | 🔌 DCC: {dcc_ip}:{dcc_port}"
             else:
                 botlink_line = f"🔗 BotLink: ? | 🔌 DCC: disabled"
-        except:
+        except Exception:
             botlink_line = None
 
-    # ─────────── Cache Statistics (NEW!) ───────────
-    cache_lines = []
+    # ─────────── Cache Statistics (COMPACT: 3 in ONE line) ───────────
+    cache_summary_line = None
     try:
-        # Helper function to format cache stats
-        def format_cache_stats(cache_name, cache_obj, display_name):
-            """Format statistics for a single cache"""
+        def _get_cache_stats(cache_obj):
+            """Return (size, maxlen, hit_rate%, evict, exp) or None."""
             if not cache_obj:
                 return None
 
-            # Get stats object (might be nested in _cache for wrapper classes)
             stats = None
             if hasattr(cache_obj, 'stats'):
                 stats = cache_obj.stats
@@ -951,57 +935,40 @@ def cmd_status(self, channel, feedback, nick, host, msg):
             if not stats:
                 return None
 
-            # Get maxlen (might be in wrapper or nested cache)
             maxlen = getattr(cache_obj, 'maxlen', None)
             if maxlen is None and hasattr(cache_obj, '_cache'):
-                maxlen = getattr(cache_obj._cache, 'maxlen', '?')
+                maxlen = getattr(cache_obj._cache, 'maxlen', None)
             if maxlen is None:
-                maxlen = '?'
+                maxlen = "?"
 
-            # Calculate percentages
-            size = stats.size
-            fill_pct = (size / maxlen * 100) if isinstance(maxlen, int) and maxlen > 0 else 0
-            hit_rate = stats.hit_rate * 100 if stats.hit_rate else 0
+            size = getattr(stats, "size", 0)
+            hr = (getattr(stats, "hit_rate", 0.0) or 0.0) * 100.0
+            ev = getattr(stats, "evictions", 0)
+            ex = getattr(stats, "expired", 0)
+            return size, maxlen, hr, ev, ex
 
-            # Choose emoji based on fill percentage
-            if fill_pct < 50:
-                fill_emoji = "🟢"
-            elif fill_pct < 80:
-                fill_emoji = "🟡"
-            else:
-                fill_emoji = "🔴"
+        uc = _get_cache_stats(self.user_cache)
+        lc = _get_cache_stats(self.logged_in_users)
+        hc = None
+        if hasattr(self, "host_to_nicks"):
+            hc = _get_cache_stats(self.host_to_nicks)
 
-            # Format the line
-            line = (
-                f"  {fill_emoji} {display_name}: "
-                f"{size}/{maxlen} ({fill_pct:.0f}%) | "
-                f"Hit: {hit_rate:.1f}% | "
-                f"Evict: {stats.evictions} | "
-                f"Exp: {stats.expired}"
-            )
-            return line
+        parts = []
+        if uc:
+            size, mx, hr, ev, ex = uc
+            parts.append(f"👤User {size}/{mx} H{hr:.1f}% E{ev} X{ex}")
+        if lc:
+            size, mx, hr, ev, ex = lc
+            parts.append(f"🔐Logged {size}/{mx} H{hr:.1f}% E{ev} X{ex}")
+        if hc:
+            size, mx, hr, ev, ex = hc
+            parts.append(f"🌐Host→Nick {size}/{mx} H{hr:.1f}% E{ev} X{ex}")
 
-        # Check each cache
-        caches_to_check = [
-            ('user_cache', self.user_cache, 'User Cache'),
-            ('logged_in_users', self.logged_in_users, 'Logged Users'),
-        ]
-
-        # Also check for optimized caches if they exist
-        if hasattr(self, 'known_users_cache'):
-            caches_to_check.append(('known_users_cache', self.known_users_cache, 'Known Users'))
-
-        if hasattr(self, 'host_to_nicks') and hasattr(self.host_to_nicks, 'stats'):
-            caches_to_check.append(('host_to_nicks', self.host_to_nicks, 'Host→Nick'))
-
-        for cache_name, cache_obj, display_name in caches_to_check:
-            line = format_cache_stats(cache_name, cache_obj, display_name)
-            if line:
-                cache_lines.append(line)
+        if parts:
+            cache_summary_line = "🧠 Cache: " + " | ".join(parts)
 
     except Exception as e:
-        # If cache stats fail, don't break the whole status command
-        cache_lines.append(f"  ⚠️ Cache stats error: {str(e)}")
+        cache_summary_line = f"⚠️ Cache: error ({str(e)})"
 
     # ─────────── Compose mesaj ───────────
     msg_lines = [
@@ -1014,12 +981,9 @@ def cmd_status(self, channel, feedback, nick, host, msg):
     if botlink_line:
         msg_lines.append(botlink_line)
 
-    # Add cache statistics section (replaces old simple counters)
-    if cache_lines:
-        msg_lines.append("📊 Cache Statistics:")
-        msg_lines.extend(cache_lines)
+    if cache_summary_line:
+        msg_lines.append(cache_summary_line)
     else:
-        # Fallback to simple counters if cache stats not available
         msg_lines.append(f"👥 Logged Users: {users_logged} | 🧠 Known: {known_users} | 📝 User Cache: {user_cache}")
 
     msg_lines.extend([
@@ -1029,6 +993,7 @@ def cmd_status(self, channel, feedback, nick, host, msg):
 
     for line in msg_lines:
         self.send_message(feedback, line)
+
 
 
 def cmd_myset(self, channel, feedback, nick, host, msg):
@@ -2989,3 +2954,15 @@ def _cmd_user_link(self, channel, feedback, nick, host, args):
     url = f"http://localhost:{port}/user/{channel}/{target_nick}"
     self.send_message(feedback, f"{nick}: User analytics for {target_nick}: {url}")
 
+
+def cmd_weather(self, channel, feedback, nick, host, args):
+    try:
+        from modules.weather import cmd_weather_thread as _w
+        arg_list = args.split() if args else []
+        _w(self, feedback, nick, host, channel, arg_list)
+    except ImportError:
+        self.send_message(feedback, "❌ Weather module not installed.")
+
+# Alias pentru !w
+def cmd_w(self, channel, feedback, nick, host, args):
+    cmd_weather(self, channel, feedback, nick, host, args)
