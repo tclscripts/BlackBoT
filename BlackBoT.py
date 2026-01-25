@@ -184,6 +184,7 @@ class Bot(irc.IRCClient):
         self.recover_nick_timer_start = False
         self.connected = False
         self.channel_details = []
+        self.channel_info = {}
         self.nickname = nickname
         self.realname = realname
         self.away = s.away
@@ -984,8 +985,19 @@ class Bot(irc.IRCClient):
         # Cere WHO pentru a popula channel_details (nick, ident, host, realname)
         try:
             self.sendLine(f"WHO {channel}")
+            self.sendLine(f"MODE {channel}")
+            self.sendLine(f"MODE {channel} +b")
         except Exception:
             pass
+
+        if channel not in self.channel_info:
+            self.channel_info[channel] = {
+                'modes': '',
+                'bans': [],
+                'topic': '',
+                'creation_time': None,
+                'last_updated': time.time()
+            }
 
         # Programăm verificarea ban-urilor după ce WHO a avut timp să vină
         if hasattr(self, 'ban_expiration_manager'):
@@ -1802,6 +1814,90 @@ class Bot(irc.IRCClient):
                 self.join_channel(params[1])
 
     def irc_unknown(self, prefix, command, params):
+
+        # =========================================================================
+        # PROCESARE MODURI ȘI BANURI DE CANAL
+        # =========================================================================
+        # 324 / RPL_CHANNELMODEIS: Răspuns la MODE #channel
+        if command in ['324', 'RPL_CHANNELMODEIS']:
+            try:
+                if len(params) >= 3:
+                    channel = params[1]
+                    modes = params[2]
+                    mode_args = params[3:] if len(params) > 3 else []
+
+                    if channel not in self.channel_info:
+                        self.channel_info[channel] = {
+                            'modes': '', 'bans': [], 'topic': '',
+                            'creation_time': None, 'last_updated': time.time()
+                        }
+
+                    self.channel_info[channel]['modes'] = modes
+                    self.channel_info[channel]['mode_args'] = mode_args
+                    self.channel_info[channel]['last_updated'] = time.time()
+
+            except Exception as e:
+                logger.error(f"Error processing channel modes: {e}")
+            return
+
+        # 367 / RPL_BANLIST: Un ban din listă
+        if command in ['367', 'RPL_BANLIST']:
+            try:
+                if len(params) >= 3:
+                    channel = params[1]
+                    banmask = params[2]
+                    setter = params[3] if len(params) > 3 else 'unknown'
+                    timestamp = params[4] if len(params) > 4 else None
+
+                    if channel not in self.channel_info:
+                        self.channel_info[channel] = {
+                            'modes': '', 'bans': [], 'topic': '',
+                            'creation_time': None, 'last_updated': time.time()
+                        }
+
+                    ban_entry = {
+                        'mask': banmask,
+                        'setter': setter,
+                        'timestamp': timestamp
+                    }
+
+                    if ban_entry not in self.channel_info[channel]['bans']:
+                        self.channel_info[channel]['bans'].append(ban_entry)
+
+                    logger.debug(f"ðŸš« Ban list for {channel}: {banmask} (set by {setter})")
+            except Exception as e:
+                logger.error(f"Error processing ban list: {e}")
+            return
+
+        # 368 / RPL_ENDOFBANLIST: Sfârșitul listei de banuri
+        if command in ['368', 'RPL_ENDOFBANLIST']:
+            try:
+                if len(params) >= 2:
+                    channel = params[1]
+                    logger.debug(f"âœ… Received complete ban list for {channel}")
+            except Exception as e:
+                logger.error(f"Error processing end of ban list: {e}")
+            return
+
+        # 329 / RPL_CREATIONTIME: Timpul de creare a canalului
+        if command in ['329', 'RPL_CREATIONTIME']:
+            try:
+                if len(params) >= 3:
+                    channel = params[1]
+                    creation_time = params[2]
+
+                    if channel not in self.channel_info:
+                        self.channel_info[channel] = {
+                            'modes': '', 'bans': [], 'topic': '',
+                            'creation_time': None, 'last_updated': time.time()
+                        }
+
+                    self.channel_info[channel]['creation_time'] = creation_time
+                    logger.debug(f"ðŸ•' Channel {channel} created at: {creation_time}")
+            except Exception as e:
+                logger.error(f"Error processing creation time: {e}")
+            return
+
         if command == 'PONG':
             return
 
@@ -2914,9 +3010,96 @@ class Bot(irc.IRCClient):
                     # mod fără argument (b, i, m etc.) -> ignorăm aici
                     continue
 
+            if channel.startswith("#") and hasattr(self, 'channel_info'):
+                if channel not in self.channel_info:
+                    self.channel_info[channel] = {
+                        'modes': '', 'bans': [], 'topic': '',
+                        'creation_time': None, 'last_updated': time.time()
+                    }
+
+                # Păstrează modurile actuale și aplică schimbările
+                current_modes = self.channel_info[channel].get('modes', '').replace('+', '')
+                mode_list = list(current_modes)
+
+                # Aplică schimbările (+ sau -)
+                arg_i = 0
+                for ch in modes:
+                    if ch == "+":
+                        adding = True
+                        continue
+                    if ch == "-":
+                        adding = False
+                        continue
+
+                    # Skip mode-uri cu argument (o, h, v, q, a, k, l)
+                    if ch in ("o", "h", "v", "q", "a", "k", "l"):
+                        arg_i += 1
+                        continue
+
+                    # Aplică mode-ul de canal
+                    if adding and ch not in mode_list:
+                        mode_list.append(ch)
+                    elif not adding and ch in mode_list:
+                        mode_list.remove(ch)
+
+                self.channel_info[channel]['modes'] = '+' + ''.join(sorted(mode_list))
+                self.channel_info[channel]['last_updated'] = time.time()
+
         except Exception as e:
             if hasattr(self, "logger"):
                 self.logger.error(f"irc_MODE error: {e}", exc_info=True)
+
+
+
+    def channel_has_mode(self, channel, mode_char):
+        """
+        Verifică dacă un canal are un anumit mod setat
+
+        Args:
+            channel: Numele canalului
+            mode_char: Caracterul modului (ex: 's', 'p', 'i')
+
+        Returns:
+            bool: True dacă modul este setat
+        """
+        if not hasattr(self, 'channel_info') or channel not in self.channel_info:
+            return False
+
+        modes = self.channel_info[channel].get('modes', '')
+        return mode_char in modes.replace('+', '')
+
+
+    def is_secret_channel(self, channel):
+        """
+        Verifică dacă un canal este secret (+s)
+        """
+        return self.channel_has_mode(channel, 's')
+
+
+    def get_channel_modes(self, channel):
+        """
+        Returnează modurile unui canal
+
+        Returns:
+            str: Moduri (ex: '+nts') sau '' dacă nu sunt disponibile
+        """
+        if not hasattr(self, 'channel_info') or channel not in self.channel_info:
+            return ''
+        return self.channel_info[channel].get('modes', '')
+
+
+    def get_channel_bans(self, channel):
+        """
+        Returnează lista de banuri a unui canal
+
+        Returns:
+            list: Listă de dicționare cu {'mask', 'setter', 'timestamp'}
+        """
+        if not hasattr(self, 'channel_info') or channel not in self.channel_info:
+            return []
+        return self.channel_info[channel].get('bans', [])
+
+
 
 
 class BotFactory(protocol.ReconnectingClientFactory):
@@ -2991,7 +3174,6 @@ class BotFactory(protocol.ReconnectingClientFactory):
         logger.info(f"Connection failed: {reason}. Rotating server & retrying...")
         v.connected = False
         self.rotate_and_connect()
-
 
 def server_has_port(server):
     if len(server.split()) > 1:
@@ -3195,7 +3377,6 @@ if __name__ == '__main__':
         else:
             # Retry dacă bot-ul nu e încă creat
             reactor.callLater(1.0, setup_signals_when_ready)
-
 
     reactor.callLater(1.0, setup_signals_when_ready)
     logger.debug(f"🚀 BlackBoT started successfully! Connecting to {host}:{port}")

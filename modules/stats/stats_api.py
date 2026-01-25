@@ -25,7 +25,10 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from modules.stats.stats_user_analytics import get_analytics
 
+
 from core.sql_manager import SQLManager
+import threading
+
 
 
 app = FastAPI(title="IRC Stats UI", version="1.0.0")
@@ -41,17 +44,22 @@ app.add_middleware(
 # Injectate de StatsAPIServerThread
 sql = None
 DEFAULT_BOT_ID: Optional[int] = None
+BOT_INSTANCE = None
+_MODE_REFRESH_MIN_INTERVAL = 20  # secunde
+_mode_refresh_lock = threading.Lock()
+_last_mode_refresh = {}  # channel -> ts (time.time())
 
-
-def init_api(bot_id: int, sql_instance=None):
+def init_api(bot_id: int, sql_instance=None, bot_instance=None):
     """
     Cheama asta din stats_api_threaded inainte sa pornesti uvicorn,
     ca UI sa stie botId-ul corect si SQL handle-ul corect.
     """
-    global DEFAULT_BOT_ID, sql
+    global DEFAULT_BOT_ID, sql, BOT_INSTANCE
     DEFAULT_BOT_ID = int(bot_id)
     if sql_instance is not None:
         sql = sql_instance
+    if bot_instance is not None:
+        BOT_INSTANCE = bot_instance
 
 
 @app.on_event("startup")
@@ -104,29 +112,122 @@ def _safe_str(x, default="") -> str:
 def _get_bot_id() -> int:
     return int(DEFAULT_BOT_ID or 1)
 
+def _request_channel_modes_refresh(channel: str):
+    """
+    Cere MODE #chan ca să umple cache-ul botului.
+    Throttled ca să nu flood-uim când UI se refresh-uiește des.
+    """
+    bot = BOT_INSTANCE
+    if not bot or not channel:
+        return
+
+    now = time.time()
+    with _mode_refresh_lock:
+        last = float(_last_mode_refresh.get(channel, 0) or 0)
+        if (now - last) < _MODE_REFRESH_MIN_INTERVAL:
+            return
+        _last_mode_refresh[channel] = now
+
+    # Încearcă thread-safe via reactor
+    try:
+        from twisted.internet import reactor
+        reactor.callFromThread(bot.sendLine, f"MODE {channel}")
+    except Exception:
+        try:
+            bot.sendLine(f"MODE {channel}")
+        except Exception:
+            pass
+
+def _bot_is_on_channel(bot, channel: str) -> bool:
+    if not bot or not channel:
+        return False
+
+    # 1) Cea mai probabilă la tine (ai channel_details)
+    try:
+        if hasattr(bot, "channel_details") and isinstance(bot.channel_details, dict):
+            return channel in bot.channel_details
+    except Exception:
+        pass
+
+    # 2) Alte variante comune
+    for attr in ("channels", "joinedChannels", "joined_channels"):
+        try:
+            val = getattr(bot, attr, None)
+            if isinstance(val, dict):
+                return channel in val
+            if isinstance(val, (set, list, tuple)):
+                return channel in val
+        except Exception:
+            pass
+
+    return False
+
 
 def _query_channels(bot_id: int) -> List[Dict[str, Any]]:
     """
-    Lista canale din STATS_CHANNEL (doar #...).
+    Sidebar channels.
+    - ascunde canalele +s (secret)
+    - dacă modurile nu sunt încă disponibile, ascunde canalul și cere refresh MODE #chan
+      (privacy-first)
     """
     q = """
         SELECT channel, total_messages, total_users, last_event_ts
         FROM STATS_CHANNEL
         WHERE botId = ?
-        ORDER BY total_messages DESC
+          AND channel LIKE '#%'
+        ORDER BY last_event_ts DESC
     """
     rows = sql.sqlite_select(q, (bot_id,))
     out = []
+
+    bot = BOT_INSTANCE
+
     for ch, msgs, users, last_ts in rows:
-        if not ch or not str(ch).startswith("#"):
+        if not ch:
             continue
+        channel = str(ch)
+        if not channel.startswith("#"):
+            continue
+
+        if bot and not _bot_is_on_channel(bot, channel):
+            # bot nu mai e pe canal => nu-l arăta în sidebar
+            continue
+
+        if bot and hasattr(bot, "get_channel_modes"):
+            try:
+                modes = bot.get_channel_modes(channel) or ""
+            except Exception:
+                modes = ""
+
+            # dacă nu știm încă modurile -> ascundem și cerem refresh
+            if not modes:
+                _request_channel_modes_refresh(channel)
+                continue
+
+            # dacă e secret -> ascundem
+            # (modes poate fi "+nts" sau "nts"; acoperim ambele)
+            if "s" in str(modes).replace("+", ""):
+                continue
+
+        elif bot and hasattr(bot, "is_secret_channel"):
+            # fallback dacă ai doar is_secret_channel (dar nu get_channel_modes)
+            try:
+                # dacă nu poate decide (din cauza delay), tot privacy-first:
+                if bot.is_secret_channel(channel):
+                    continue
+            except Exception:
+                _request_channel_modes_refresh(channel)
+                continue
+
         out.append({
-            "channel": str(ch),
+            "channel": channel,
             "messages": _safe_int(msgs),
             "users": _safe_int(users),
             "last_activity": _fmt_last_activity(last_ts),
         })
+
     return out
+
 
 
 def _query_channel_summary(bot_id: int, channel: str) -> Dict[str, Any]:
