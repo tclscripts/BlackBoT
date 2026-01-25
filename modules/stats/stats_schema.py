@@ -106,7 +106,6 @@ CREATE_STATS_DAILY_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_daily_nick ON STATS_DAILY(botId, channel, nick, date DESC);",
 ]
 
-
 # =============================================================================
 # TABELA 3: STATS_HOURLY (heatmap: hour x day of week)
 # =============================================================================
