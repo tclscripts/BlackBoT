@@ -1419,6 +1419,14 @@ def cmd_delchan(self, channel, feedback, nick, host, msg):
     _remove_case_insensitive(self.channels, canonical)
     _remove_case_insensitive(self.notOnChannels, canonical)
 
+    try:
+        if hasattr(self, "channel_info") and self.channel_info:
+            real_key = next((k for k in self.channel_info.keys() if k.lower() == canonical.lower()), None)
+            if real_key:
+                del self.channel_info[real_key]
+    except Exception:
+        pass
+
     if self.channel_details:
         self.channel_details = [arr for arr in self.channel_details if (arr[0] or "").lower() != canonical.lower()]
 
@@ -2478,27 +2486,256 @@ def cmd_ip(self, channel, feedback, nick, host, msg):
     """
     !ip <ip|host|nick>
 
-    Get IP/host information (ASN/ORG/LOC/TZ).
-    If nick is provided, does WHO lookup first.
-
-    Examples:
-      !ip 8.8.8.8
-      !ip google.com
-      !ip Enki  <- NEW: Does WHO lookup automatically
+    BlackIP.tcl-like implementation:
+      - resolve A+AAAA for hostnames
+      - prefer IPv6 as primary when available
+      - geolocation via ip-api.com (same as BlackIP.tcl)
+      - proxy flag via proxycheck.io (same as BlackIP.tcl)
+      - show "Other rDNS:" as the other resolved IPs (A/AAAA leftovers)
     """
-    from core import nettools
     from twisted.internet.threads import deferToThread
+    import socket
+    import ipaddress
+    import requests
 
+    # -----------------------------
+    # Helpers (IP / DNS)
+    # -----------------------------
+    def _is_ip(s: str) -> bool:
+        try:
+            ipaddress.ip_address(s)
+            return True
+        except Exception:
+            return False
+
+    def _resolve_all_ips(name: str):
+        """Return (v4_list, v6_list) preserving discovery order, unique."""
+        v4, v6 = [], []
+        try:
+            infos = socket.getaddrinfo(name, None, proto=socket.IPPROTO_TCP)
+            for fam, _, _, _, sockaddr in infos:
+                ip = sockaddr[0]
+                if fam == socket.AF_INET:
+                    if ip not in v4:
+                        v4.append(ip)
+                elif fam == socket.AF_INET6:
+                    if ip not in v6:
+                        v6.append(ip)
+        except Exception:
+            pass
+        return v4, v6
+
+    def _pick_primary_and_others(v4, v6):
+        """
+        BlackIP.tcl behavior:
+          - primary = first IPv6 if exists else first IPv4
+          - others = remaining IPs (both v4 and v6) excluding primary
+          - output others joined by ", "
+        """
+        primary = None
+        if v6:
+            primary = v6[0]
+            v6_rest = v6[1:]
+            v4_rest = v4
+        else:
+            primary = v4[0] if v4 else None
+            v4_rest = v4[1:] if v4 else []
+            v6_rest = v6
+
+        others = []
+        # In TCL: first they append ipv4_list then ipv6_list (rest only)
+        if v4_rest:
+            others.extend(v4_rest)
+        if v6_rest:
+            others.extend(v6_rest)
+
+        return primary, others
+
+    # -----------------------------
+    # BlackIP.tcl-like providers
+    # -----------------------------
+    def _ip_api_lookup(ip: str, timeout=5):
+        """
+        Same fields list as in BlackIP.tcl:
+        country, regionName, city, lat, lon, timezone, mobile, proxy, query, reverse, status, message, isp
+        """
+        url = (
+            f"http://ip-api.com/json/{ip}"
+            "?fields=country,regionName,city,lat,lon,timezone,mobile,proxy,query,reverse,status,message,isp"
+        )
+        r = requests.get(url, timeout=timeout)
+        if r.status_code != 200:
+            return {"ok": False, "error": f"ip-api.com HTTP {r.status_code}"}
+        try:
+            data = r.json()
+        except Exception:
+            return {"ok": False, "error": "ip-api.com invalid JSON"}
+
+        if data.get("status") != "success":
+            return {"ok": False, "error": data.get("message") or "ip-api.com fail"}
+
+        return {"ok": True, "raw": data}
+
+    def _proxycheck_lookup(ip: str, timeout=5):
+        """
+        Same idea as BlackIP.tcl: proxycheck.io/v1/<ip> and read proxy yes/no.
+        """
+        url = f"http://proxycheck.io/v1/{ip}"
+        r = requests.get(url, timeout=timeout)
+        if r.status_code != 200:
+            return None
+        try:
+            data = r.json()
+        except Exception:
+            return None
+
+        # proxycheck returns a dict keyed by the IP:
+        # { "status":"ok", "IP":"x.x.x.x", "x.x.x.x": {"proxy":"yes"/"no", ... } }
+        node = data.get(ip)
+        if isinstance(node, dict):
+            p = (node.get("proxy") or "").lower()
+            if p in ("yes", "no"):
+                return (p == "yes")
+        return None
+
+    def _format_blackip(host_display: str, ip: str, data: dict, proxy_bool, other_ips):
+        city = (data.get("city") or "").strip()
+        region = (data.get("regionName") or "").strip()
+        country = (data.get("country") or "").strip()
+
+        loc_parts = [p for p in (city, region, country) if p]
+        location = ", ".join(loc_parts) if loc_parts else "-"
+
+        lat = data.get("lat")
+        lon = data.get("lon")
+        latlon = f" ({lat}, {lon})" if lat is not None and lon is not None else ""
+
+        tz = data.get("timezone") or "-"
+        isp = data.get("isp") or "-"
+
+        mobile = data.get("mobile")
+        mobile_s = "Yes" if mobile is True else "No"
+
+        proxy_val = proxy_bool
+        if proxy_val is None:
+            proxy_val = data.get("proxy")
+        proxy_s = "Yes" if proxy_val is True else "No"
+
+        # 🔹 LINIA PRINCIPALĂ (TOTUL PE O SINGURĂ LINIE)
+        main_line = (
+            f"🌍 Host: {host_display} | "
+            f"📍 Location: {location}{latlon} | "
+            f"🕒 Timezone: {tz} | "
+            f"🛰️ IP: {ip} | "
+            f"🏢 ISP: {isp} | "
+            f"📱 Mobile: {mobile_s} | "
+            f"🛡️ Proxy: {proxy_s}"
+        )
+
+        lines = [main_line]
+
+        # 🔹 LINIE SEPARATĂ DOAR PENTRU OTHER rDNS
+        if other_ips:
+            lines.append(f"🔁 Other rDNS: {', '.join(other_ips)}")
+
+        return lines
+
+    # -----------------------------
+    # Main
+    # -----------------------------
     target = (msg or "").strip().split()[0] if msg else ""
     if not target:
         self.send_message(feedback, f"Usage: {config.char}ip <ip|host|nick>")
         return
 
-    if _is_ip_or_hostname(target):
-        # Direct lookup for IP/hostname
+    def _lookup_for_host_or_ip(host_or_ip: str, header_line: str = None, host_label: str = None):
+        """
+        host_or_ip can be:
+          - IP literal (v4/v6)
+          - hostname
+        We'll:
+          - resolve A+AAAA if hostname
+          - choose primary (prefer v6)
+          - query ip-api.com using primary IP (NOT hostname)
+          - proxycheck.io using primary IP
+        """
+        # Decide primary IP and "other IPs"
+        other_ips = []
+        primary_ip = None
+
+        if _is_ip(host_or_ip):
+            primary_ip = host_or_ip
+        else:
+            v4, v6 = _resolve_all_ips(host_or_ip)
+            primary_ip, other_ips = _pick_primary_and_others(v4, v6)
+            if not primary_ip:
+                return [f"❌ Cannot resolve host: {host_or_ip}"]
+
+        # ip-api.com lookup (same source as BlackIP.tcl)
+        ip_api = _ip_api_lookup(primary_ip, timeout=5)
+        if not ip_api.get("ok"):
+            return [f"❌ ip lookup failed for {primary_ip}: {ip_api.get('error','fail')}"]
+
+        data = ip_api["raw"]
+
+        # proxycheck (same as BlackIP.tcl)
+        proxy_bool = None
+        try:
+            proxy_bool = _proxycheck_lookup(primary_ip, timeout=5)
+        except Exception:
+            proxy_bool = None
+
+        # host_display:
+        # For hostname input, TCL prints "<hostname> is located in ..."
+        # For direct IP input, TCL prints "<ip> is located in ..."
+        host_display = host_label or host_or_ip
+
+        lines = []
+        if header_line:
+            lines.append(header_line)
+
+        lines.extend(_format_blackip(host_display, primary_ip, data, proxy_bool, other_ips))
+        return lines
+
+    # If it's an ip/hostname directly => do direct
+    if _is_ip(target) or _is_ip_or_hostname(target):
         def work():
-            res = nettools.ip_info(target)
-            return nettools.format_ipinfo(res)
+            # For direct args, header line not needed.
+            return _lookup_for_host_or_ip(target)
+
+        def done(lines):
+            for line in lines:
+                self.send_message(feedback, line)
+
+        deferToThread(work).addCallback(done)
+        return
+
+    # Else treat as nick => WHO lookup first
+    def on_who_result(info):
+        if not info:
+            # Cache fallback
+            if hasattr(self, "channel_details"):
+                for row in self.channel_details:
+                    if len(row) > 3 and (row[1] or "").lower() == target.lower():
+                        info = {'nick': row[1], 'host': row[3]}
+                        break
+
+        if not info:
+            self.send_message(feedback, f"❌ Cannot resolve user: {target}")
+            return
+
+        user_host = info.get('host', '')
+        user_nick = info.get('nick', target)
+
+        if not user_host:
+            self.send_message(feedback, f"❌ No host found for {user_nick}")
+            return
+
+        def work():
+            # TCL first line:
+            # "Nick: X ; Host: Y"
+            header = f"Nick: {user_nick} ; Host: {user_host}"
+            return _lookup_for_host_or_ip(user_host, header_line=header, host_label=user_host)
 
         def done(lines):
             for line in lines:
@@ -2506,53 +2743,16 @@ def cmd_ip(self, channel, feedback, nick, host, msg):
 
         deferToThread(work).addCallback(done)
 
+    def on_who_error(failure):
+        self.send_message(feedback, f"❌ Cannot resolve user: {target}")
+
+    if hasattr(self, "get_user_info_async"):
+        d = self.get_user_info_async(target, timeout=5.0)
+        d.addCallback(on_who_result)
+        d.addErrback(on_who_error)
     else:
-        # WHO lookup for nick
-        def on_who_result(info):
-            if not info:
-                # Cache fallback
-                if hasattr(self, "channel_details"):
-                    for row in self.channel_details:
-                        if len(row) > 3 and (row[1] or "").lower() == target.lower():
-                            info = {
-                                'nick': row[1],
-                                'host': row[3]
-                            }
-                            break
+        self.send_message(feedback, f"❌ WHO lookup not available. Try: {config.char}ip <ip|host>")
 
-            if not info:
-                self.send_message(feedback, f"❌ Cannot resolve user: {target}")
-                return
-
-            user_host = info.get('host', '')
-            user_nick = info.get('nick', target)
-
-            if not user_host:
-                self.send_message(feedback, f"❌ No host found for {user_nick}")
-                return
-
-            # IP info on resolved host
-            def work():
-                res = nettools.ip_info(user_host)
-                return nettools.format_ipinfo(res)
-
-            def done(lines):
-                if lines:
-                    lines[0] = f"👤 {user_nick} ({user_host}): {lines[0]}"
-                for line in lines:
-                    self.send_message(feedback, line)
-
-            deferToThread(work).addCallback(done)
-
-        def on_who_error(failure):
-            self.send_message(feedback, f"❌ Cannot resolve user: {target}")
-
-        if hasattr(self, "get_user_info_async"):
-            d = self.get_user_info_async(target, timeout=5.0)
-            d.addCallback(on_who_result)
-            d.addErrback(on_who_error)
-        else:
-            self.send_message(feedback, f"❌ WHO lookup not available. Try: {config.char}ip <ip|host>")
 
 
 def cmd_asn(self, channel, feedback, nick, host, msg):
