@@ -2815,7 +2815,8 @@ class Bot(irc.IRCClient):
             required = ["fastapi", "uvicorn", "pydantic"]
             ok = ensure_packages(required, python_exec=sys.executable, env=env, cwd=str(base_dir))
             if not ok:
-                logger.error("❌ Dependency installation failed. Restart aborted.")
+                logger.warning("Could not verify/install dependencies - continuing anyway")
+                logger.info("Launcher will handle missing packages on next start")
                 return
         except Exception as e:
             logger.warning(f"Deps check failed (continuing): {e}")
