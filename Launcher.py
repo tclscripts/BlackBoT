@@ -159,10 +159,13 @@ class HybridBlackBotLauncher:
 
         return True
 
-    def install_packages(self, force_reinstall: bool = False) -> bool:
-        """Install required packages"""
 
-        print_info("📦 Checking and installing packages...")
+    def install_packages(self, force_reinstall: bool = False) -> bool:
+        """Install packages from requirements.txt using ensure_packages"""
+
+        print_info("📦 Checking and installing packages from requirements.txt...")
+
+        # Upgrade pip first
         try:
             subprocess.run([str(self.pip_exec), "install", "--upgrade", "pip"],
                            check=True, capture_output=True)
@@ -170,63 +173,110 @@ class HybridBlackBotLauncher:
         except subprocess.CalledProcessError:
             print_warning("Could not upgrade pip")
 
-        # Check and install required packages
-        missing_packages = []
-        for package in self.required_packages:
-            if force_reinstall:
-                missing_packages.append(package)
-            else:
-                try:
-                    result = subprocess.run(
-                        [str(self.pip_exec), "show", package],
-                        capture_output=True,
-                        text=True
-                    )
-                    if result.returncode != 0:
-                        missing_packages.append(package)
-                except Exception:
-                    missing_packages.append(package)
+        # Verifică că requirements.txt există
+        if not self.requirements_file.exists():
+            print_error(f"❌ requirements.txt not found at {self.requirements_file}")
+            print_info("Creating minimal requirements.txt...")
 
-        if missing_packages:
-            print_info(f"Installing {len(missing_packages)} packages: {', '.join(missing_packages)}")
+            # Creează requirements.txt minimal dacă lipsește
+            minimal_requirements = """# BlackBoT Requirements
+twisted~=24.11.0
+pyopenssl
+service_identity
+psutil~=7.0.0
+scapy~=2.6.1
+bcrypt~=4.3.0
+watchdog~=6.0.0
+requests~=2.32.4
+pyyaml
+"""
+            with open(self.requirements_file, 'w') as f:
+                f.write(minimal_requirements)
+            print_success(f"✅ Created {self.requirements_file}")
 
-            for package in missing_packages:
-                try:
-                    print_info(f"➕ Installing {package}...")
-                    subprocess.run(
-                        [str(self.pip_exec), "install", package],
-                        check=True,
-                        capture_output=True
-                    )
-                    print_success(f"✅ {package} installed")
-                except subprocess.CalledProcessError as e:
-                    print_error(f"❌ Failed to install {package}: {e}")
+        # Import ensure_packages
+        try:
+            # Adaugă core la path dacă nu e deja
+            core_path = self.base_dir / "core"
+            if core_path.exists():
+                import sys
+                sys.path.insert(0, str(self.base_dir))
+
+            from core.deps import ensure_packages
+        except ImportError:
+            # Fallback la deps.py în root
+            try:
+                import sys
+                sys.path.insert(0, str(self.base_dir))
+                from deps import ensure_packages
+            except ImportError:
+                print_error("❌ Could not import ensure_packages from deps.py")
+                print_error("   Make sure deps.py exists in project root or core/")
+                return False
+
+        # Instalează pachete din requirements.txt
+        ok, details = ensure_packages(
+            requirements_file=str(self.requirements_file),
+            python_exec=str(self.python_exec),
+            cwd=str(self.base_dir)
+        )
+
+        if ok:
+            print_success(f"✅ Total packages checked: {details['total']}")
+
+            if details['newly_installed']:
+                installed_count = len(details['newly_installed'])
+                print_success(f"✅ Installed {installed_count} packages:")
+                # Arată primele 10
+                for pkg in details['newly_installed'][:10]:
+                    print_success(f"   • {pkg}")
+                if installed_count > 10:
+                    print_success(f"   ... and {installed_count - 10} more")
+
+            if details['already_installed']:
+                print_success(f"✅ Already available: {len(details['already_installed'])} packages")
+
+            print_success("All packages installed successfully! 🎉")
+            return True
+        else:
+            # Partial success - some failed
+            print_warning(f"⚠️ Checked {details['total']} packages from requirements.txt")
+
+            if details['already_installed']:
+                print_success(f"✅ Available: {len(details['already_installed'])} packages")
+
+            if details['newly_installed']:
+                installed_count = len(details['newly_installed'])
+                print_success(f"✅ Installed {installed_count} packages:")
+                for pkg in details['newly_installed'][:10]:
+                    print_success(f"   • {pkg}")
+                if installed_count > 10:
+                    print_success(f"   ... and {installed_count - 10} more")
+
+            if details['failed']:
+                failed_count = len(details['failed'])
+                print_error(f"❌ Failed to install {failed_count} packages:")
+                for pkg in details['failed'][:10]:
+                    print_error(f"   • {pkg}")
+                if failed_count > 10:
+                    print_error(f"   ... and {failed_count - 10} more")
+
+                if details['error_message']:
+                    print_error(f"   Error: {details['error_message'][:200]}")
+
+                print_error("Some packages failed to install!")
+                print_info("You can:")
+                print_info("  1. Check pip/permissions")
+                print_info("  2. Install manually: pip install <package>")
+                print_info("  3. Continue anyway (some features may not work)")
+
+                # Întreabă user dacă vrea să continue
+                response = input("Continue anyway? [y/N]: ").strip().lower()
+                if response != 'y':
                     return False
 
-            print_success("All required packages installed successfully!")
-        else:
-            print_success("All required packages are already installed")
-
-        # Install optional packages (don't fail if they don't install)
-        print_info("Installing optional packages...")
-        for package in self.optional_packages:
-            try:
-                result = subprocess.run(
-                    [str(self.pip_exec), "show", package],
-                    capture_output=True,
-                    text=True
-                )
-                if result.returncode != 0:
-                    subprocess.run(
-                        [str(self.pip_exec), "install", package],
-                        check=True,
-                        capture_output=True
-                    )
-                    print_success(f"✅ Optional package {package} installed")
-            except Exception:
-                print_warning(f"⚠️ Optional package {package} failed to install (not critical)")
-
-        return True
+            print_warning("Continuing with partial installation...")
+            return True
 
     def validate_blackbot_installation(self) -> bool:
         """Validate BlackBoT installation and configuration"""

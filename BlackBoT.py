@@ -2811,13 +2811,54 @@ class Bot(irc.IRCClient):
         env["BLACKBOT_INSTANCE_NAME"] = instance
 
         try:
+            # Import ensure_packages cu fallback
             from core.deps import ensure_packages
-            required = ["fastapi", "uvicorn", "pydantic"]
-            ok = ensure_packages(required, python_exec=sys.executable, env=env, cwd=str(base_dir))
-            if not ok:
-                logger.warning("Could not verify/install dependencies - continuing anyway")
+            # Folosește requirements.txt ca sursă unică de adevăr
+            requirements_file = base_dir / "requirements.txt"
+
+            logger.info("Checking dependencies from requirements.txt...")
+
+            ok, details = ensure_packages(
+                requirements_file=requirements_file,
+                python_exec=sys.executable,
+                env=env,
+                cwd=str(base_dir)
+            )
+
+            if ok:
+                logger.info(f"✅ Total packages checked: {details['total']}")
+                if details['newly_installed']:
+                    logger.info(f"✅ Installed: {', '.join(details['newly_installed'][:5])}")
+                    if len(details['newly_installed']) > 5:
+                        logger.info(f"   ... and {len(details['newly_installed']) - 5} more")
+                if details['already_installed']:
+                    logger.info(f"✅ Already available: {len(details['already_installed'])} packages")
+                logger.info("All dependencies are ready")
+            else:
+                # Afișează detalii despre ce a mers și ce nu
+                logger.info(f"📊 Checked {details['total']} packages from {details['source']}")
+
+                if details['already_installed']:
+                    logger.info(f"✅ Available: {len(details['already_installed'])} packages")
+
+                if details['newly_installed']:
+                    logger.info(f"✅ Installed: {', '.join(details['newly_installed'][:5])}")
+                    if len(details['newly_installed']) > 5:
+                        logger.info(f"   ... and {len(details['newly_installed']) - 5} more")
+
+                if details['failed']:
+                    logger.warning(
+                        f"❌ Failed to install ({len(details['failed'])}): {', '.join(details['failed'][:10])}")
+                    if len(details['failed']) > 10:
+                        logger.warning(f"   ... and {len(details['failed']) - 10} more")
+                    if details['error_message']:
+                        logger.warning(f"   Error details: {details['error_message'][:200]}")
+
+                logger.warning("Some dependencies could not be installed - continuing anyway")
+                logger.info("Launcher will handle missing packages on next start")
         except Exception as e:
-            logger.warning(f"Deps check failed (continuing): {e}")
+            logger.warning(f"Dependency check skipped: {e}")
+            logger.info("Continuing with restart - Launcher will verify packages on start")
 
         logger.info(f"🚀 Launching new process: {script}")
 
