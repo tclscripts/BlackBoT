@@ -247,6 +247,7 @@ class Bot(irc.IRCClient):
             global_singleton=True
         )
         self._start_worker("known_users", target=self.cleanup_known_users, global_singleton=True)
+        self._start_worker("sql_keepalive", target=self._sql_keepalive_loop, global_singleton=True)
         if self.sql.sqlite_has_active_ignores(self.botId):
             logger.info("⏳ Active ignores found. Starting cleanup thread...")
             self._start_worker("ignore_cleanup", target=self.cleanup_ignores)
@@ -3568,6 +3569,45 @@ class Bot(irc.IRCClient):
             removed = before - after
             if removed > 0:
                 logger.info(f"🧹 Cleaned known_users: {removed} offline users removed, {after} still active")
+
+    def _sql_keepalive_loop(self):
+        """
+        SQL connection keepalive loop
+        Face ping periodic la database pentru a preveni connection timeout
+        Rulează la fiecare 5 minute
+        """
+        from core.threading_utils import get_event
+        import time
+
+        stop_ev = get_event("sql_keepalive")
+        interval = 300  # 5 minute
+
+        logger.info("🔄 SQL keepalive started (ping every 5 minutes)")
+
+        while not stop_ev.is_set():
+            try:
+                # Ping simplu la database
+                self.sql.sqlite3_execute("SELECT 1")
+                logger.debug("✅ SQL keepalive ping OK")
+
+            except Exception as e:
+                logger.error(f"❌ SQL keepalive ping failed: {e}")
+
+                # Încearcă să reseteze connection pool
+                try:
+                    logger.warning("🔄 Resetting SQL connection pool...")
+                    self.sql.close_connection()
+                    logger.info("✅ SQL connection pool reset - will reconnect on next query")
+                except Exception as reset_error:
+                    logger.error(f"Failed to reset connection pool: {reset_error}")
+
+            # Sleep cu verificare pentru graceful shutdown
+            for _ in range(interval):
+                if stop_ev.is_set():
+                    break
+                time.sleep(1)
+
+        logger.info("SQL keepalive stopped")
 
     def rehash(self, channel, feedback, nick, host):
         import importlib

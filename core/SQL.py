@@ -43,7 +43,7 @@ class SQL:
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute("PRAGMA temp_store=MEMORY;")
             conn.execute("PRAGMA cache_size=-2000;")
-            conn.execute("PRAGMA busy_timeout=10000;")  # 10 seconds busy timeout
+            conn.execute("PRAGMA busy_timeout=30000;")  # 10 seconds busy timeout
             return conn
         except Exception as e:
             logger.error("SQLite connection failed for '%s': %s", self.database, e, exc_info=True)
