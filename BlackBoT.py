@@ -254,6 +254,7 @@ class Bot(irc.IRCClient):
         self.message_delay = s.message_delay
         self._start_worker("message_sender", target=self._message_worker, global_singleton=False)
         self.thread_check_for_changed_nick = None
+        self._migrate_env_on_startup()
         if s.autoUpdateEnabled:
             self._start_worker("auto_update", target=self.auto_update_check_loop, global_singleton=True)
 
@@ -3053,6 +3054,108 @@ class Bot(irc.IRCClient):
 
         # Pornește procesul nou
         reactor.callLater(2.0, self._restart_process, from_autoupdate)
+
+    def _migrate_env_on_startup(self):
+        """
+        Migrează .env la pornirea bot-ului (one-time check)
+        Adaugă Q/X/user_modes dacă lipsesc
+        """
+        from pathlib import Path
+
+        try:
+            base_dir = Path(__file__).parent.resolve()
+            env_file = base_dir / ".env"
+
+            if not env_file.exists():
+                logger.debug("No .env file found - skipping migration")
+                return
+
+            # Citește conținut
+            env_content = env_file.read_text(encoding='utf-8')
+
+            # Verifică dacă are nevoie de migrare
+            needs_migration = (
+                    ("BLACKBOT_QUAKENET_AUTH_ENABLED" not in env_content) or
+                    ("BLACKBOT_UNDERNET_AUTH_ENABLED" not in env_content) or
+                    ("BLACKBOT_USER_MODES" not in env_content)
+            )
+
+            if not needs_migration:
+                logger.debug("✅ .env already up-to-date")
+                return
+
+            logger.info("🔄 Migrating .env with new authentication settings...")
+
+            lines = env_content.splitlines()
+            insert_index = None
+
+            # Caută un punct bun după NickServ
+            for i, line in enumerate(lines):
+                if "BLACKBOT_NICKSERV_PASSWORD" in line:
+                    insert_index = i + 1
+                    break
+            if insert_index is None:
+                for i, line in enumerate(lines):
+                    if "BLACKBOT_NICKSERV_ENABLED" in line or "BLACKBOT_NICKSERV_LOGIN_ENABLED" in line:
+                        insert_index = i + 1
+                        break
+            if insert_index is None:
+                insert_index = len(lines)
+
+            # Construiește DOAR ce lipsește
+            new_auth_section_lines = []
+
+            # QuakeNet Q (dacă lipsește)
+            if "BLACKBOT_QUAKENET_AUTH_ENABLED" not in env_content:
+                new_auth_section_lines.extend([
+                    "",
+                    "# QuakeNet Q Authentication",
+                    "BLACKBOT_QUAKENET_AUTH_ENABLED=false",
+                    "BLACKBOT_QUAKENET_USERNAME=",
+                    "BLACKBOT_QUAKENET_PASSWORD=",
+                ])
+
+            # Undernet X (dacă lipsește)
+            if "BLACKBOT_UNDERNET_AUTH_ENABLED" not in env_content:
+                new_auth_section_lines.extend([
+                    "",
+                    "# Undernet X Authentication",
+                    "BLACKBOT_UNDERNET_AUTH_ENABLED=false",
+                    "BLACKBOT_UNDERNET_USERNAME=",
+                    "BLACKBOT_UNDERNET_PASSWORD=",
+                ])
+
+            # User Modes (dacă lipsește)
+            if "BLACKBOT_USER_MODES" not in env_content:
+                new_auth_section_lines.extend([
+                    "",
+                    "# User Modes (set after connection)",
+                    "BLACKBOT_USER_MODES=",
+                ])
+
+            # Adaugă o linie goală la final
+            if new_auth_section_lines:
+                new_auth_section_lines.append("")
+
+            # Inserează ca linii separate
+            lines[insert_index:insert_index] = new_auth_section_lines
+
+            # Backup
+            backup_file = env_file.with_suffix(env_file.suffix + ".pre-migration")
+            if not backup_file.exists():
+                backup_file.write_text(env_content, encoding="utf-8")
+                logger.info(f"💾 Backup saved: {backup_file.name}")
+
+            # Scrie înapoi
+            new_content = "\n".join(lines).rstrip() + "\n"
+            env_file.write_text(new_content, encoding="utf-8")
+
+            logger.info("✅ .env migrated successfully")
+            logger.info("   New fields: Q/X auth + user_modes")
+
+        except Exception as e:
+            logger.warning(f"⚠️  .env migration failed: {e}")
+            logger.info("Bot will continue normally - migration can be done manually")
 
     def _restart_process(self, from_autoupdate: bool = False):
         """

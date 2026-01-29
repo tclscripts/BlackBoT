@@ -822,9 +822,11 @@ class UnifiedBlackBotManager:
         with open(env_file, 'r', encoding='utf-8') as f:
             content = f.read()
 
-        # Verifică dacă are deja setările noi
-        if 'BLACKBOT_QUAKENET_AUTH_ENABLED' in content:
-            return False  # Already migrated
+        needs_migration = (
+                ('BLACKBOT_QUAKENET_AUTH_ENABLED' not in content) or
+                ('BLACKBOT_UNDERNET_AUTH_ENABLED' not in content) or
+                ('BLACKBOT_USER_MODES' not in content)
+        )
 
         print_info(f"🔄 Migrating {config.name} .env with new auth settings...")
 
@@ -854,18 +856,41 @@ class UnifiedBlackBotManager:
             print_warning(f"⚠️  Could not find insertion point in {config.name} .env")
             return False
 
-        # Construiește setările noi
-        new_auth_section = """
-# QuakeNet Q Authentication
-BLACKBOT_QUAKENET_AUTH_ENABLED=false
-BLACKBOT_QUAKENET_USERNAME=
-BLACKBOT_QUAKENET_PASSWORD=
+        # Construiește DOAR ce lipsește
+        new_auth_section_lines = []
 
-# Undernet X Authentication
-BLACKBOT_UNDERNET_AUTH_ENABLED=false
-BLACKBOT_UNDERNET_USERNAME=
-BLACKBOT_UNDERNET_PASSWORD=
-    """
+        # QuakeNet Q (dacă lipsește)
+        if 'BLACKBOT_QUAKENET_AUTH_ENABLED' not in content:
+            new_auth_section_lines.extend([
+                "",
+                "# QuakeNet Q Authentication",
+                "BLACKBOT_QUAKENET_AUTH_ENABLED=false",
+                "BLACKBOT_QUAKENET_USERNAME=",
+                "BLACKBOT_QUAKENET_PASSWORD=",
+            ])
+
+        # Undernet X (dacă lipsește)
+        if 'BLACKBOT_UNDERNET_AUTH_ENABLED' not in content:
+            new_auth_section_lines.extend([
+                "",
+                "# Undernet X Authentication",
+                "BLACKBOT_UNDERNET_AUTH_ENABLED=false",
+                "BLACKBOT_UNDERNET_USERNAME=",
+                "BLACKBOT_UNDERNET_PASSWORD=",
+            ])
+
+        # User Modes (dacă lipsește)
+        if 'BLACKBOT_USER_MODES' not in content:
+            new_auth_section_lines.extend([
+                "",
+                "# User Modes (set after connection)",
+                "BLACKBOT_USER_MODES=",
+            ])
+
+        if new_auth_section_lines:
+            new_auth_section_lines.append("")
+
+        new_auth_section = '\n'.join(new_auth_section_lines)
 
         # Inserează
         lines.insert(insert_index, new_auth_section)
