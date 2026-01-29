@@ -195,6 +195,10 @@ class Bot(irc.IRCClient):
         self.botId = 0
         self.pending_whois = {}
         self.nickserv_waiting = False
+        self.authenticated = False  # Authentication status
+        self.auth_method = 'nickserv'  # 'nickserv', 'q', 'x'
+        self.auth_service_username = ''  # Store username for Q/X services
+        self.auth_timeout_call = None  # Timer pentru timeout autentificare
         self.ignore_cleanup_started = False
         self._hb_stop = None
         self.nick_already_in_use = 0
@@ -912,6 +916,34 @@ class Bot(irc.IRCClient):
         # 🧹 CURĂȚENIE GENERALĂ
         self._clean_user_memory(nick, is_quit=True)
 
+    def _set_user_modes(self):
+        """
+        Set user modes after connection
+
+        Example modes:
+        - +x: Hide IP/hostname (Undernet, QuakeNet)
+        - +i: Invisible (don't show in global WHO)
+        - +B: Bot flag
+        - +w: Wallops (receive oper messages)
+        """
+        user_modes = getattr(s, 'user_modes', '').strip()
+
+        if not user_modes:
+            return
+
+        try:
+            # Validare simplă - modes trebuie să înceapă cu + sau -
+            if not user_modes.startswith(('+', '-')):
+                logger.warning(f"⚠️  Invalid user modes format: {user_modes} (must start with + or -)")
+                return
+
+            # Trimite MODE command
+            self.sendLine(f"MODE {self.nickname} {user_modes}")
+            logger.info(f"🎭 Setting user modes: {user_modes}")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to set user modes: {e}")
+
     def signedOn(self):
         # start stats system
         init_stats_system(self)
@@ -920,7 +952,6 @@ class Bot(irc.IRCClient):
         # load commands
         self.load_commands()
         try:
-            # pornește monitorul doar dacă suntem efectiv conectați
             if self.connected:
                 self._start_monitor_init_async()
         except Exception as e:
@@ -928,20 +959,27 @@ class Bot(irc.IRCClient):
             self.monitor_enabled = False
             self.user_cache.clear()
         if self.known_users:
-            logger.info("🔄 Resetting user caches.")
             self.known_users.clear()
         self.connected = True
         self.current_connect_time = time.time()
         self.sendLine("AWAY :" + s.away)
+        self._set_user_modes()
         # Start ban expiration manager
         if hasattr(self, 'ban_expiration_manager'):
             self.ban_expiration_manager.start()
-            logger.info("✅ Ban expiration manager started")
-        if s.nickserv_login_enabled:
-            self.login_nickserv()
-            if s.require_nickserv_ident:
-                logger.info("⏳ Waiting for NickServ identification before joining channels.")
-                return
+        any_auth_configured = (
+                (getattr(s, "quakenet_auth_enabled", False) and s.quakenet_username and s.quakenet_password) or
+                (getattr(s, "undernet_auth_enabled", False) and s.undernet_username and s.undernet_password) or
+                (getattr(s, "nickserv_login_enabled", False) and getattr(s, "nickserv_password", ""))
+        )
+
+        if any_auth_configured:
+            self.perform_authentication()
+            logger.info("⏳ Waiting for services auth before joining channels.")
+            return
+        else:
+            logger.info("No auth configured.")
+
         self._join_channels()
 
     def lineReceived(self, line):
@@ -1707,14 +1745,123 @@ class Bot(irc.IRCClient):
             time.sleep(60)
 
     def login_nickserv(self):
+        """Legacy method - redirects to universal auth"""
+        self.perform_authentication()
+
+    def perform_authentication(self):
+        """
+        Universal authentication method supporting:
+        - NickServ (Libera.Chat, OFTC, etc.)
+        - Q (QuakeNet)
+        - X (Undernet)
+        """
+        # Check QuakeNet Q auth
+        if s.quakenet_auth_enabled and s.quakenet_username and s.quakenet_password:
+            self.login_quakenet_q()
+            self._set_auth_timeout()  # ← ADAUGĂ TIMEOUT
+            return
+
+        # Check Undernet X auth
+        if s.undernet_auth_enabled and s.undernet_username and s.undernet_password:
+            self.login_undernet_x()
+            self._set_auth_timeout()  # ← ADAUGĂ TIMEOUT
+            return
+
+        # Fall back to NickServ
         if not s.nickserv_login_enabled or not s.nickserv_password:
             return
+
         try:
             self.sendLine(f"PRIVMSG {s.nickserv_nick} :IDENTIFY {s.nickserv_botnick} {s.nickserv_password}")
             logger.info(f"🔐 Sent IDENTIFY to {s.nickserv_nick}")
             self.nickserv_waiting = True
+            self.auth_method = 'nickserv'
+            self.authenticated = False
+            self._set_auth_timeout()  # ← ADAUGĂ TIMEOUT
         except Exception as e:
-            logger.info(f"❌ Failed to IDENTIFY to {s.nickserv_nick}: {e}")
+            logger.error(f"❌ Failed to IDENTIFY to {s.nickserv_nick}: {e}")
+
+    def login_quakenet_q(self):
+        """
+        Authenticate with QuakeNet Q service
+
+        Format: /msg Q@CServe.quakenet.org AUTH username password
+        """
+        try:
+            service_host = "Q@CServe.quakenet.org"
+            auth_msg = f"AUTH {s.quakenet_username} {s.quakenet_password}"
+
+            self.sendLine(f"PRIVMSG {service_host} :{auth_msg}")
+            logger.info(f"🔐 Sent AUTH to Q@CServe.quakenet.org")
+
+            # Set waiting flags
+            self.nickserv_waiting = True
+            self.auth_method = 'q'
+            self.authenticated = False
+            self.auth_service_username = s.quakenet_username
+
+        except Exception as e:
+            logger.error(f"❌ Failed to AUTH to QuakeNet Q: {e}")
+
+    def login_undernet_x(self):
+        """
+        Authenticate with Undernet X service
+
+        Format: /msg X@channels.undernet.org LOGIN username password
+        """
+        try:
+            service_host = "X@channels.undernet.org"
+            auth_msg = f"LOGIN {s.undernet_username} {s.undernet_password}"
+
+            self.sendLine(f"PRIVMSG {service_host} :{auth_msg}")
+            logger.info(f"🔐 Sent LOGIN to X@channels.undernet.org")
+
+            # Set waiting flags
+            self.nickserv_waiting = True
+            self.auth_method = 'x'
+            self.authenticated = False
+            self.auth_service_username = s.undernet_username
+
+        except Exception as e:
+            logger.error(f"❌ Failed to LOGIN to Undernet X: {e}")
+
+    def _set_auth_timeout(self):
+        from twisted.internet import reactor
+
+        timeout_seconds = getattr(s, 'auth_timeout_seconds', 30)
+
+        if self.auth_timeout_call and self.auth_timeout_call.active():
+            self.auth_timeout_call.cancel()
+
+        # Setează nou timeout
+        self.auth_timeout_call = reactor.callLater(
+            timeout_seconds,
+            self._auth_timeout_handler
+        )
+
+
+    def _auth_timeout_handler(self):
+        """
+        Handler pentru timeout de autentificare
+        Apelat dacă nu s-a primit răspuns de la serviciul de auth în timpul alocat
+        """
+        if not self.authenticated and self.nickserv_waiting:
+            auth_method = getattr(self, "auth_method", "unknown")
+
+            logger.warning(f"⏰ Authentication timeout after 30s!")
+            logger.warning(f"   Method: {auth_method}")
+            logger.warning(f"   No response from auth service - proceeding anyway")
+
+            # Resetează flags
+            self.nickserv_waiting = False
+            self.authenticated = False
+
+            # Join channels oricum
+            logger.info("➡️  Joining channels without authentication")
+            self._join_channels()
+        else:
+            # Deja autentificat sau nu mai așteaptă - ignore
+            logger.debug("Auth timeout handler called but no longer waiting")
 
     def start_ignore_cleanup_if_needed(self):
         if not self.ignore_cleanup_started:
@@ -2545,22 +2692,134 @@ class Bot(irc.IRCClient):
         return ""
 
     def noticed(self, user, channel, message):
+        """
+        Handle NOTICE messages from services (NickServ, Q, X)
+        Detects successful/failed authentication
+        """
         nick = user.split("!")[0] if user else ""
-        if nick.lower() == s.nickserv_nick.lower() and getattr(self, "nickserv_waiting", True):
-            if any(keyword in message.lower() for keyword in
-                   ["you are now identified", "has been successfully identified"]):
-                logger.info("✅ NickServ identification successful (via NOTICE).")
+        message_lower = message.lower()
+
+        # Only process if waiting for auth
+        if not getattr(self, "nickserv_waiting", False):
+            return
+
+        auth_method = getattr(self, "auth_method", "nickserv")
+
+        # QuakeNet Q service
+        if auth_method == 'q' and nick.upper() == 'Q':
+            # Success patterns for Q
+            success_patterns = [
+                "you are now logged in as",
+                "you are now authed as",
+                "authentication successful"
+            ]
+
+            # Failure patterns for Q
+            failure_patterns = [
+                "username or password incorrect",
+                "incorrect password",
+                "access denied",
+                "authentication failed"
+            ]
+
+            # Already logged patterns
+            already_patterns = [
+                "you are already logged in",
+                "you are already authed"
+            ]
+
+            if any(pattern in message_lower for pattern in success_patterns):
+                logger.info(f"✅ QuakeNet Q authentication successful!")
+                logger.info(f"   Logged in as: {getattr(self, 'auth_service_username', 'unknown')}")
                 self.nickserv_waiting = False
+                self.authenticated = True
+                if self.auth_timeout_call and self.auth_timeout_call.active():
+                    self.auth_timeout_call.cancel()
                 self._join_channels()
-            elif any(keyword in message.lower() for keyword in
-                     ["password incorrect", "authentication failed", "is not a registered"]):
-                logger.info("❌ NickServ identification failed (via NOTICE).")
+
+            elif any(pattern in message_lower for pattern in already_patterns):
+                logger.info(f"✅ Already authenticated with QuakeNet Q")
                 self.nickserv_waiting = False
+                self.authenticated = True
+                if self.auth_timeout_call and self.auth_timeout_call.active():
+                    self.auth_timeout_call.cancel()
+                self._join_channels()
+
+            elif any(pattern in message_lower for pattern in failure_patterns):
+                logger.error(f"❌ QuakeNet Q authentication FAILED!")
+                logger.error(f"   Message: {message}")
+                self.nickserv_waiting = False
+                self.authenticated = False
+                if self.auth_timeout_call and self.auth_timeout_call.active():
+                    self.auth_timeout_call.cancel()
+                self._join_channels()
+
+        # Undernet X service
+        elif auth_method == 'x' and nick.upper() == 'X':
+            # Success patterns for X
+            success_patterns = [
+                "authentication successful",
+                "you are now logged in",
+                "logged you in as"
+            ]
+
+            # Failure patterns for X
+            failure_patterns = [
+                "password incorrect",
+                "incorrect password",
+                "access denied",
+                "authentication failed",
+                "invalid username or password"
+            ]
+
+            # Already logged patterns
+            already_patterns = [
+                "you are already logged in",
+                "already authenticated"
+            ]
+
+            if any(pattern in message_lower for pattern in success_patterns):
+                logger.info(f"✅ Undernet X authentication successful!")
+                logger.info(f"   Logged in as: {getattr(self, 'auth_service_username', 'unknown')}")
+                self.nickserv_waiting = False
+                self.authenticated = True
+                self._join_channels()
+
+            elif any(pattern in message_lower for pattern in already_patterns):
+                logger.info(f"✅ Already authenticated with Undernet X")
+                self.nickserv_waiting = False
+                self.authenticated = True
+                self._join_channels()
+
+            elif any(pattern in message_lower for pattern in failure_patterns):
+                logger.error(f"❌ Undernet X authentication FAILED!")
+                logger.error(f"   Message: {message}")
+                self.nickserv_waiting = False
+                self.authenticated = False
                 logger.info("➡️ Falling back to main channel only.")
                 for chan in s.channels:
                     self.join(chan)
                     self.channels.append(chan)
-                    self.send_message(chan, "❌ NickServ identification failed. Limited channel access.")
+
+        # Traditional NickServ
+        elif nick.lower() == s.nickserv_nick.lower():
+            if any(keyword in message_lower for keyword in
+                   ["you are now identified", "has been successfully identified"]):
+                logger.info("✅ NickServ identification successful (via NOTICE).")
+                self.nickserv_waiting = False
+                self.authenticated = True
+                self._join_channels()
+
+            elif any(keyword in message_lower for keyword in
+                     ["password incorrect", "authentication failed", "is not a registered"]):
+                logger.error("❌ NickServ identification failed (via NOTICE).")
+                self.nickserv_waiting = False
+                self.authenticated = False
+                logger.info("➡️ Falling back to main channel only.")
+                for chan in s.channels:
+                    self.join(chan)
+                    self.channels.append(chan)
+
 
     def privmsg(self, user, channel, msg):
         nick = user.split("!")[0]
@@ -2743,7 +3002,7 @@ class Bot(irc.IRCClient):
             return True
         return False
 
-    def restart(self, reason="Restarting..."):
+    def restart(self, reason="Restarting...", from_autoupdate=False):
         """Restart the bot gracefully"""
         import os
         import sys
@@ -2793,10 +3052,16 @@ class Bot(irc.IRCClient):
             logger.error(f"Error during restart cleanup: {e}")
 
         # Pornește procesul nou
-        reactor.callLater(2.0, self._restart_process)
+        reactor.callLater(2.0, self._restart_process, from_autoupdate)
 
-    def _restart_process(self):
-        """Actually restart the process"""
+    def _restart_process(self, from_autoupdate: bool = False):
+        """
+        Actually restart the process
+
+        Args:
+            from_autoupdate: True dacă restart vine din auto-update
+                             (verifică și instalează requirements)
+        """
         import os
         import sys
         import subprocess
@@ -2808,57 +3073,169 @@ class Bot(irc.IRCClient):
         base_dir = Path(__file__).resolve().parent
         script = base_dir / "BlackBoT.py"
         env = os.environ.copy()
-        env["BLACKBOT_INSTANCE_NAME"] = instance
+
+        logger.info("🔄 Restarting BlackBoT process...")
 
         try:
-            # Import ensure_packages cu fallback
-            from core.deps import ensure_packages
-            # Folosește requirements.txt ca sursă unică de adevăr
-            requirements_file = base_dir / "requirements.txt"
+            # ✅ AUTO-UPDATE: Verifică requirements DOAR dacă e din auto-update
+            if from_autoupdate:
+                logger.info("🔄 Performing auto-update from GitHub...")
 
-            logger.info("Checking dependencies from requirements.txt...")
+                # Git pull
+                try:
+                    git_result = subprocess.run(
+                        ["git", "pull"],
+                        cwd=base_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
 
-            ok, details = ensure_packages(
-                requirements_file=requirements_file,
-                python_exec=sys.executable,
-                env=env,
-                cwd=str(base_dir)
-            )
+                    if git_result.returncode == 0:
+                        if "Already up to date" in git_result.stdout:
+                            logger.info("✅ Already up to date")
+                        else:
+                            logger.info("✅ Auto-update successful")
+                            logger.debug(f"Git output: {git_result.stdout}")
+                    else:
+                        logger.warning(f"⚠️  Git pull warning: {git_result.stderr}")
 
-            if ok:
-                logger.info(f"✅ Total packages checked: {details['total']}")
-                if details['newly_installed']:
-                    logger.info(f"✅ Installed: {', '.join(details['newly_installed'][:5])}")
-                    if len(details['newly_installed']) > 5:
-                        logger.info(f"   ... and {len(details['newly_installed']) - 5} more")
-                if details['already_installed']:
-                    logger.info(f"✅ Already available: {len(details['already_installed'])} packages")
-                logger.info("All dependencies are ready")
+                except subprocess.TimeoutExpired:
+                    logger.error("❌ Git pull timeout (30s)")
+                except FileNotFoundError:
+                    logger.error("❌ Git not found - cannot auto-update")
+                except Exception as e:
+                    logger.error(f"❌ Auto-update failed: {e}", exc_info=True)
+
+                # Best-effort dependency check DOAR pentru auto-update
+                logger.info("🔄 Checking dependencies after auto-update...")
+                try:
+                    # Import ensure_packages cu fallback
+                    try:
+                        from core.deps import ensure_packages
+                    except ImportError:
+                        sys.path.insert(0, str(base_dir))
+                        from deps import ensure_packages  # type: ignore
+
+                    requirements_file = base_dir / "requirements.txt"
+                    if requirements_file.exists():
+                        ok, details = ensure_packages(requirements_file=requirements_file)
+
+                        total = details.get('total', 0)
+                        installed = details.get('newly_installed', 0)
+                        failed = details.get('failed', 0)
+
+                        if ok:
+                            if installed > 0:
+                                logger.info(f"✅ Installed {installed}/{total} new packages")
+                            else:
+                                logger.info(f"✅ All {total} packages already available")
+                        else:
+                            logger.warning(f"⚠️  Package installation partial: {installed} ok, {failed} failed")
+                            logger.info("Continuing with restart - Launcher will verify packages on start")
+                    else:
+                        logger.warning("⚠️  requirements.txt not found")
+
+                except Exception as e:
+                    logger.warning(f"Dependency check skipped: {e}")
+                    logger.info("Continuing with restart - Launcher will verify packages on start")
             else:
-                # Afișează detalii despre ce a mers și ce nu
-                logger.info(f"📊 Checked {details['total']} packages from {details['source']}")
+                # ✅ RESTART MANUAL: Skip dependency check
+                logger.info("📝 Manual restart - skipping dependency check")
 
-                if details['already_installed']:
-                    logger.info(f"✅ Available: {len(details['already_installed'])} packages")
+            # ✅ AUTO-MIGRATE .env (indiferent de tipul de restart)
+            try:
+                logger.info("🔄 Checking for .env migration...")
 
-                if details['newly_installed']:
-                    logger.info(f"✅ Installed: {', '.join(details['newly_installed'][:5])}")
-                    if len(details['newly_installed']) > 5:
-                        logger.info(f"   ... and {len(details['newly_installed']) - 5} more")
+                # Prefer .env din instanță dacă există (ca să nu migrezi globalul din greșeală)
+                instance_env = base_dir / "instances" / instance / ".env"
+                global_env = base_dir / ".env"
+                env_file = instance_env if instance_env.exists() else global_env
 
-                if details['failed']:
-                    logger.warning(
-                        f"❌ Failed to install ({len(details['failed'])}): {', '.join(details['failed'][:10])}")
-                    if len(details['failed']) > 10:
-                        logger.warning(f"   ... and {len(details['failed']) - 10} more")
-                    if details['error_message']:
-                        logger.warning(f"   Error details: {details['error_message'][:200]}")
+                if env_file.exists():
+                    env_content = env_file.read_text(encoding="utf-8")
 
-                logger.warning("Some dependencies could not be installed - continuing anyway")
-                logger.info("Launcher will handle missing packages on next start")
+                    needs_migration = (
+                            ("BLACKBOT_QUAKENET_AUTH_ENABLED" not in env_content) or
+                            ("BLACKBOT_UNDERNET_AUTH_ENABLED" not in env_content) or
+                            ("BLACKBOT_USER_MODES" not in env_content)
+                    )
+
+                    if needs_migration:
+                        logger.info(f"📝 Migrating {env_file.name} with new authentication settings...")
+
+                        lines = env_content.splitlines()
+                        insert_index = None
+
+                        # Caută un punct bun după NickServ
+                        for i, line in enumerate(lines):
+                            if "BLACKBOT_NICKSERV_PASSWORD" in line:
+                                insert_index = i + 1
+                                break
+                        if insert_index is None:
+                            for i, line in enumerate(lines):
+                                if "BLACKBOT_NICKSERV_ENABLED" in line or "BLACKBOT_NICKSERV_LOGIN_ENABLED" in line:
+                                    insert_index = i + 1
+                                    break
+                        if insert_index is None:
+                            insert_index = len(lines)
+
+                        # ✅ Construiește DOAR ce lipsește
+                        new_auth_section_lines = []
+
+                        # QuakeNet Q (dacă lipsește)
+                        if "BLACKBOT_QUAKENET_AUTH_ENABLED" not in env_content:
+                            new_auth_section_lines.extend([
+                                "",
+                                "# QuakeNet Q Authentication",
+                                "BLACKBOT_QUAKENET_AUTH_ENABLED=false",
+                                "BLACKBOT_QUAKENET_USERNAME=",
+                                "BLACKBOT_QUAKENET_PASSWORD=",
+                            ])
+
+                        # Undernet X (dacă lipsește)
+                        if "BLACKBOT_UNDERNET_AUTH_ENABLED" not in env_content:
+                            new_auth_section_lines.extend([
+                                "",
+                                "# Undernet X Authentication",
+                                "BLACKBOT_UNDERNET_AUTH_ENABLED=false",
+                                "BLACKBOT_UNDERNET_USERNAME=",
+                                "BLACKBOT_UNDERNET_PASSWORD=",
+                            ])
+
+                        # User Modes (dacă lipsește)
+                        if "BLACKBOT_USER_MODES" not in env_content:
+                            new_auth_section_lines.extend([
+                                "",
+                                "# User Modes (set after connection)",
+                                "BLACKBOT_USER_MODES=",
+                            ])
+
+                        # Adaugă o linie goală la final
+                        if new_auth_section_lines:
+                            new_auth_section_lines.append("")
+
+                        # Inserează ca linii separate (nu ca un singur string mare)
+                        lines[insert_index:insert_index] = new_auth_section_lines
+
+                        backup_file = env_file.with_suffix(env_file.suffix + ".pre-migration")
+                        if not backup_file.exists():
+                            backup_file.write_text(env_content, encoding="utf-8")
+                            logger.info(f"💾 Backup saved: {backup_file.name}")
+
+                        new_content = "\n".join(lines).rstrip() + "\n"
+                        env_file.write_text(new_content, encoding="utf-8")
+                        logger.info("✅ .env migrated successfully")
+                    else:
+                        logger.info("✅ .env already up-to-date")
+
+            except Exception as e:
+                logger.warning(f"⚠️  .env migration failed: {e}", exc_info=True)
+
+            logger.info("🚀 Executing restart...")
+
         except Exception as e:
-            logger.warning(f"Dependency check skipped: {e}")
-            logger.info("Continuing with restart - Launcher will verify packages on start")
+            logger.error(f"🔥 Restart pre-flight crashed: {e}", exc_info=True)
 
         logger.info(f"🚀 Launching new process: {script}")
 
@@ -2888,24 +3265,21 @@ class Bot(irc.IRCClient):
         logger.info("✅ New process launched, exiting old process...")
 
         # --- FIX: PAUZĂ PENTRU DRAIN DCC ---
-        # Permitem log-ului de mai sus să ajungă la clientul DCC
-
-        # A) Flush la logger-ul Python
         for handler in logging.getLogger().handlers:
             try:
                 handler.flush()
-            except:
+            except Exception:
                 pass
 
-        # B) Trimitem un mesaj manual pe socket pentru confirmare vizuală
         if hasattr(self, 'dcc') and self.dcc:
             msg = "\n🚀 Handover complete. Old process dying in 2s...\r\n"
-            for nick, session in list(self.dcc.sessions.items()):
-                if session and session.transport:
+            for nick, session in list(getattr(self.dcc, "sessions", {}).items()):
+                if session and getattr(session, "transport", None):
                     try:
                         session.transport.write(msg.encode('utf-8'))
-                    except:
+                    except Exception:
                         pass
+
         time.sleep(2.0)
         # -----------------------------------
 
@@ -3193,7 +3567,7 @@ class Bot(irc.IRCClient):
                 if remote_version and remote_version > local_version:
                     logger.info(f"🔄 Update found → {remote_version} > {local_version}")
                     update.update_from_github(self, "Auto-update")
-                    self.restart("🔁 Auto-updated")
+                    self.restart("🔄 Auto-updated", from_autoupdate=True)
                     break
             except Exception as e:
                 logger.error(f"⚠️ Auto-update thread error: {e}")

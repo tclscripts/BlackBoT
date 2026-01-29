@@ -74,12 +74,29 @@ class EnvironmentConfig:
             'ssl_cert_file': '',
             'ssl_key_file': '',
 
-            # NickServ Login Settings
+            # NickServ/X/Q Authentication Settings
+            'auth_method': 'nickserv',  # Options: 'nickserv', 'x', 'q'
             'nickserv_login_enabled': False,
             'require_nickserv_ident': True,
             'nickserv_nick': 'NickServ',
             'nickserv_botnick': 'BlackBoT',
             'nickserv_password': '',
+
+            # QuakeNet Q Authentication
+            'quakenet_auth_enabled': False,
+            'quakenet_username': '',
+            'quakenet_password': '',
+
+            # Undernet X Authentication
+            'undernet_auth_enabled': False,
+            'undernet_username': '',
+            'undernet_password': '',
+
+            # Authentication timeout
+            'auth_timeout_seconds': 30,
+
+            # User modes to set after connection
+            'user_modes': '',  # Example: '+x' for Undernet IP hiding, '+ix' for invisible+hide
 
             # Channel Settings
             'channels': ['#BlackBoT'],
@@ -265,9 +282,17 @@ class EnvironmentConfig:
             'BLACKBOT_NICKSERV_ENABLED': 'nickserv_login_enabled',
             'BLACKBOT_NICKSERV_LOGIN_ENABLED': 'nickserv_login_enabled',
             'BLACKBOT_REQUIRE_NICKSERV_IDENT': 'require_nickserv_ident',
+            'BLACKBOT_QUAKENET_AUTH_ENABLED': 'quakenet_auth_enabled',
+            'BLACKBOT_QUAKENET_USERNAME': 'quakenet_username',
+            'BLACKBOT_QUAKENET_PASSWORD': 'quakenet_password',
+            'BLACKBOT_UNDERNET_AUTH_ENABLED': 'undernet_auth_enabled',
+            'BLACKBOT_UNDERNET_USERNAME': 'undernet_username',
+            'BLACKBOT_UNDERNET_PASSWORD': 'undernet_password',
             'BLACKBOT_NICKSERV_NICK': 'nickserv_nick',
             'BLACKBOT_NICKSERV_BOTNICK': 'nickserv_botnick',
             'BLACKBOT_NICKSERV_PASSWORD': 'nickserv_password',
+            'BLACKBOT_USER_MODES': 'user_modes',
+            'BLACKBOT_AUTH_TIMEOUT_SECONDS': 'auth_timeout_seconds',
             'BLACKBOT_CHANNELS': 'channels',
             'BLACKBOT_DEFAULT_HOSTNAME': 'default_hostname',
             'BLACKBOT_MULTIPLE_LOGINS': 'multiple_logins',
@@ -306,7 +331,8 @@ class EnvironmentConfig:
         # Boolean conversions
         boolean_keys = [
             'autoUpdateEnabled', 'nickserv_login_enabled', 'require_nickserv_ident',
-            'monitor_status', 'dcc_allow_unauthed', 'botlink_autoconnect_global', 'ssl_use'
+            'monitor_status', 'dcc_allow_unauthed', 'botlink_autoconnect_global', 'ssl_use', 'quakenet_auth_enabled',
+            'undernet_auth_enabled'
         ]
         if key in boolean_keys:
             return value.lower() in ['true', '1', 'yes', 'on']

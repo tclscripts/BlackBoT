@@ -986,7 +986,36 @@ def cmd_status(self, channel, feedback, nick, host, msg):
     else:
         msg_lines.append(f"👥 Logged Users: {users_logged} | 🧠 Known: {known_users} | 📝 User Cache: {user_cache}")
 
+    # ─────────── Authentication Status ───────────
+    auth_status_line = ""
+    try:
+        if getattr(self, 'authenticated', False):
+            auth_method = getattr(self, 'auth_method', 'unknown')
+            if auth_method == 'q':
+                username = getattr(self, 'auth_service_username', 'unknown')
+                auth_status_line = f"🔐 Auth: QuakeNet Q ({username}) ✅"
+            elif auth_method == 'x':
+                username = getattr(self, 'auth_service_username', 'unknown')
+                auth_status_line = f"🔐 Auth: Undernet X ({username}) ✅"
+            elif auth_method == 'nickserv':
+                auth_status_line = f"🔐 Auth: NickServ ✅"
+            else:
+                auth_status_line = f"🔐 Auth: {auth_method} ✅"
+        elif getattr(self, 'nickserv_waiting', False):
+            auth_method = getattr(self, 'auth_method', 'unknown')
+            if auth_method == 'q':
+                auth_status_line = f"🔐 Auth: QuakeNet Q ⏳ (waiting...)"
+            elif auth_method == 'x':
+                auth_status_line = f"🔐 Auth: Undernet X ⏳ (waiting...)"
+            else:
+                auth_status_line = f"🔐 Auth: {auth_method} ⏳ (waiting...)"
+        else:
+            auth_status_line = "🔐 Auth: Not configured ⭕"
+    except Exception:
+        auth_status_line = "🔐 Auth: Unknown status"
+
     msg_lines.extend([
+        auth_status_line,
         f"💻 System: {system} {release} | CPU: {cpu_model}",
         f"⏱️ Uptime: {formatted_uptime}",
     ])

@@ -71,9 +71,25 @@ class BotInstanceConfig:
     # Channels
     channels: List[str] = None
 
-    # Authentication
+    # Authentication - Universal System
+    auth_method: str = "none"  # Options: 'none', 'nickserv', 'q', 'x'
+
+    # NickServ Authentication (Libera.Chat, OFTC, etc.)
     nickserv_enabled: bool = False
     nickserv_password: str = ""
+
+    # QuakeNet Q Authentication
+    quakenet_auth_enabled: bool = False
+    quakenet_username: str = ""
+    quakenet_password: str = ""
+
+    # Undernet X Authentication
+    undernet_auth_enabled: bool = False
+    undernet_username: str = ""
+    undernet_password: str = ""
+
+    # User modes (set after connection)
+    user_modes: str = ""  # Example: '+x' for IP hiding, '+ix' for invisible+hide
 
     # Database & Logging
     database: str = ""
@@ -141,6 +157,7 @@ class UnifiedBlackBotManager:
 
         # Load existing instances
         self.load_instances()
+        self._auto_migrate_instances()
 
         print_info(f"🤖 Unified BlackBoT Manager initialized")
         print_info(f"📁 Base directory: {self.base_dir}")
@@ -285,14 +302,181 @@ class UnifiedBlackBotManager:
 
             # Authentication
             print(f"{Colors.BOLD}🔐 Authentication{Colors.END}")
-            nickserv_enabled = print_question("Enable NickServ authentication? [y/N]: ").lower().startswith('y')
-            nickserv_password = ""
 
-            if nickserv_enabled:
-                import getpass
-                nickserv_password = getpass.getpass(f"{Colors.CYAN}❓ NickServ password: {Colors.END}")
-                if nickserv_password:
-                    print_success("NickServ authentication configured")
+            # Detectare automată rețea din servers
+            network_type = self._detect_network_type(servers)
+            print_info(f"Detected network: {network_type}")
+
+            # Inițializare variabile
+            auth_method = "none"
+            nickserv_enabled = False
+            nickserv_password = ""
+            quakenet_auth_enabled = False
+            quakenet_username = ""
+            quakenet_password = ""
+            undernet_auth_enabled = False
+            undernet_username = ""
+            undernet_password = ""
+
+            # Oferă opțiuni de autentificare bazate pe rețea
+            if network_type == "quakenet":
+                print()
+                print(f"{Colors.CYAN}QuakeNet uses Q for authentication{Colors.END}")
+                print()
+
+                use_auth = print_question("Enable QuakeNet Q authentication? [y/N]: ").lower().startswith('y')
+
+                if use_auth:
+                    # Credentials
+                    quakenet_username = print_question("Q username: ").strip()
+                    if quakenet_username:
+                        import getpass
+                        quakenet_password = getpass.getpass(f"{Colors.CYAN}▶ Q password: {Colors.END}")
+
+                        if quakenet_password:
+                            quakenet_auth_enabled = True
+                            auth_method = 'q'
+                            print_success(f"QuakeNet Q authentication configured")
+                            print_info(f"Username: {quakenet_username}")
+                        else:
+                            print_warning("No password provided - authentication disabled")
+                    else:
+                        print_warning("No username provided - authentication disabled")
+                else:
+                    print_info("No authentication configured")
+
+            elif network_type == "undernet":
+                print()
+                print(f"{Colors.CYAN}Undernet uses X for authentication{Colors.END}")
+                print()
+
+                use_auth = print_question("Enable Undernet X authentication? [y/N]: ").lower().startswith('y')
+
+                if use_auth:
+                    # Credentials
+                    undernet_username = print_question("X username: ").strip()
+                    if undernet_username:
+                        import getpass
+                        undernet_password = getpass.getpass(f"{Colors.CYAN}▶ X password: {Colors.END}")
+
+                        if undernet_password:
+                            undernet_auth_enabled = True
+                            auth_method = 'x'
+                            print_success(f"Undernet X authentication configured")
+                            print_info(f"Username: {undernet_username}")
+                        else:
+                            print_warning("No password provided - authentication disabled")
+                    else:
+                        print_warning("No username provided - authentication disabled")
+                else:
+                    print_info("No authentication configured")
+
+            elif network_type in ["libera", "freenode", "oftc"]:
+                print()
+                print(f"{Colors.CYAN}{network_type.capitalize()} uses NickServ for authentication{Colors.END}")
+                print()
+
+                nickserv_enabled = print_question("Enable NickServ authentication? [y/N]: ").lower().startswith('y')
+
+                if nickserv_enabled:
+                    import getpass
+                    nickserv_password = getpass.getpass(f"{Colors.CYAN}▶ NickServ password: {Colors.END}")
+                    if nickserv_password:
+                        auth_method = "nickserv"
+                        print_success("NickServ authentication configured")
+                    else:
+                        print_warning("No password provided - authentication disabled")
+                        nickserv_enabled = False
+                else:
+                    print_info("No authentication configured")
+
+            else:
+                # Rețea necunoscută - oferă toate opțiunile
+                print()
+                print(f"{Colors.CYAN}Authentication options:{Colors.END}")
+                print("  1. None - No authentication")
+                print("  2. NickServ - For Libera.Chat, OFTC, etc.")
+                print("  3. QuakeNet Q - For QuakeNet")
+                print("  4. Undernet X - For Undernet")
+                print()
+
+                auth_choice = print_question("Choose authentication [1-4, default=1]: ").strip()
+
+                if auth_choice == "2":
+                    # NickServ
+                    import getpass
+                    nickserv_password = getpass.getpass(f"{Colors.CYAN}▶ NickServ password: {Colors.END}")
+                    if nickserv_password:
+                        nickserv_enabled = True
+                        auth_method = "nickserv"
+                        print_success("NickServ authentication configured")
+
+                elif auth_choice == "3":
+                    # QuakeNet Q
+                    quakenet_username = print_question("Q username: ").strip()
+                    if quakenet_username:
+                        import getpass
+                        quakenet_password = getpass.getpass(f"{Colors.CYAN}▶ Q password: {Colors.END}")
+
+                        if quakenet_password:
+                            quakenet_auth_enabled = True
+                            auth_method = 'q'
+                            print_success("QuakeNet Q authentication configured")
+
+                elif auth_choice == "4":
+                    # Undernet X
+                    undernet_username = print_question("X username: ").strip()
+                    if undernet_username:
+                        import getpass
+                        undernet_password = getpass.getpass(f"{Colors.CYAN}▶ X password: {Colors.END}")
+
+                        if undernet_password:
+                            undernet_auth_enabled = True
+                            auth_method = 'x'
+                            print_success("Undernet X authentication configured")
+                else:
+                    print_info("No authentication configured")
+
+            print()
+
+            # User Modes Configuration
+            print(f"{Colors.BOLD}🎭 User Modes{Colors.END}")
+
+            # Auto-suggest modes bazat pe rețea
+            suggested_modes = ""
+            if network_type == "undernet":
+                suggested_modes = "+x"
+                print_info("Undernet recommendation: +x (hide your IP address)")
+            elif network_type == "quakenet":
+                suggested_modes = "+x"
+                print_info("QuakeNet recommendation: +x (hide your IP address)")
+            elif network_type in ["libera", "oftc"]:
+                suggested_modes = ""
+                print_info("No special modes recommended for this network")
+            else:
+                suggested_modes = ""
+                print_info("Common modes: +x (hide IP), +i (invisible), +B (bot)")
+
+            print()
+            print("User modes are IRC modes set on your nickname after connecting")
+            print("Common modes:")
+            print("  • +x - Hide your IP/hostname (recommended for Undernet/QuakeNet)")
+            print("  • +i - Invisible (don't show in global WHO)")
+            print("  • +B - Mark as bot")
+            print("  • +ix - Combination (invisible + hide IP)")
+            print()
+
+            if suggested_modes:
+                user_modes_input = print_question(f"User modes [{suggested_modes}]: ").strip()
+                user_modes = user_modes_input if user_modes_input else suggested_modes
+            else:
+                user_modes_input = print_question("User modes [leave empty for none]: ").strip()
+                user_modes = user_modes_input
+
+            if user_modes:
+                print_success(f"User modes configured: {user_modes}")
+            else:
+                print_info("No user modes will be set")
 
             print()
 
@@ -378,8 +562,16 @@ class UnifiedBlackBotManager:
                 port=port,
                 ssl_enabled=ssl_enabled,
                 channels=channels,
+                auth_method=auth_method,
                 nickserv_enabled=nickserv_enabled,
                 nickserv_password=nickserv_password,
+                quakenet_auth_enabled=quakenet_auth_enabled,
+                quakenet_username=quakenet_username,
+                quakenet_password=quakenet_password,
+                undernet_auth_enabled=undernet_auth_enabled,
+                undernet_username=undernet_username,
+                undernet_password=undernet_password,
+                user_modes=user_modes,
                 environment=environment,
                 dcc_port=dcc_port,
                 stats_api_port=stats_api_port,
@@ -431,6 +623,34 @@ class UnifiedBlackBotManager:
         for name, server, ports in networks:
             print(f"   • {Colors.CYAN}{name}{Colors.END}: {server} ({ports})")
         print()
+
+    def _detect_network_type(self, servers: List[str]) -> str:
+        """
+        Detectează tipul de rețea bazat pe numele serverului
+
+        Returns:
+            str: 'quakenet', 'libera', 'freenode', 'oftc', 'undernet', 'rizon', or 'other'
+        """
+        # Normalizăm numele serverelor
+        servers_lower = ' '.join(servers).lower()
+
+        # Detectare bazată pe keywords
+        if 'quakenet' in servers_lower:
+            return 'quakenet'
+        elif 'undernet' in servers_lower:
+            return 'undernet'
+        elif 'libera' in servers_lower:
+            return 'libera'
+        elif 'freenode' in servers_lower:
+            return 'freenode'
+        elif 'oftc' in servers_lower:
+            return 'oftc'
+        elif 'rizon' in servers_lower:
+            return 'rizon'
+        elif 'efnet' in servers_lower:
+            return 'efnet'
+        else:
+            return 'other'
 
     def _show_instance_summary(self, config: BotInstanceConfig):
         """Show instance configuration summary"""
@@ -529,6 +749,145 @@ class UnifiedBlackBotManager:
             print_error(f"Failed to create instance files: {e}")
             return False
 
+    def _auto_migrate_instances(self):
+        """
+        Auto-migrate all instances at Manager startup (one-time check)
+        Adds Q/X auth settings to old .env files
+        """
+        if not self.instances:
+            return
+
+        # Check if any instances need migration
+        needs_migration = []
+        for name, config in self.instances.items():
+            env_file = self.base_dir / "instances" / name / ".env"
+            if env_file.exists():
+                with open(env_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                if 'BLACKBOT_QUAKENET_AUTH_ENABLED' not in content:
+                    needs_migration.append(name)
+
+        if not needs_migration:
+            return  # All instances are up-to-date
+
+        # Show migration prompt
+        print()
+        print_info(f"🔄 Found {len(needs_migration)} instance(s) that need authentication settings update:")
+        for name in needs_migration[:5]:  # Show first 5
+            print(f"   • {name}")
+        if len(needs_migration) > 5:
+            print(f"   ... and {len(needs_migration) - 5} more")
+        print()
+        print_info("These instances will be automatically updated with new Q/X auth settings")
+        print_info("(Settings will be disabled by default, no impact on current behavior)")
+        print()
+
+        # Auto-migrate (with option to skip)
+        response = input(f"{Colors.CYAN}▶ Auto-migrate now? [Y/n]: {Colors.END}").strip().lower()
+        if response == 'n':
+            print_warning("⚠️  Migration skipped - will be prompted again at next Manager start")
+            print_info("   Or instances will be migrated automatically when started")
+            return
+
+        print()
+        migrated_count = 0
+        for name in needs_migration:
+            config = self.instances[name]
+            try:
+                if self._migrate_instance_env(config):
+                    migrated_count += 1
+            except Exception as e:
+                print_warning(f"⚠️  Failed to migrate {name}: {e}")
+
+        print()
+        if migrated_count > 0:
+            print_success(f"✅ Successfully migrated {migrated_count} instance(s)")
+            print_info("   Backups saved as .env.pre-migration")
+            print()
+
+    def _migrate_instance_env(self, config: BotInstanceConfig) -> bool:
+        """
+        Migrează fișierul .env al unei instanțe cu setările noi de autentificare
+        Adaugă automat setările Q/X dacă lipsesc
+
+        Returns:
+            bool: True dacă a făcut modificări, False dacă era deja up-to-date
+        """
+        env_file = self.base_dir / "instances" / config.name / ".env"
+
+        if not env_file.exists():
+            return False
+
+        # Citește conținut existent
+        with open(env_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Verifică dacă are deja setările noi
+        if 'BLACKBOT_QUAKENET_AUTH_ENABLED' in content:
+            return False  # Already migrated
+
+        print_info(f"🔄 Migrating {config.name} .env with new auth settings...")
+
+        # Găsește unde să inserăm (după NickServ settings)
+        lines = content.split('\n')
+        insert_index = None
+
+        # Caută după BLACKBOT_NICKSERV_PASSWORD sau BLACKBOT_NICKSERV_BOTNICK
+        for i, line in enumerate(lines):
+            if 'BLACKBOT_NICKSERV_PASSWORD' in line:
+                insert_index = i + 1
+                break
+            elif 'BLACKBOT_NICKSERV_BOTNICK' in line:
+                # Check if next line is not another NICKSERV setting
+                if i + 1 < len(lines) and 'BLACKBOT_NICKSERV_PASSWORD' not in lines[i + 1]:
+                    insert_index = i + 1
+                    break
+
+        if insert_index is None:
+            # Fallback: după BLACKBOT_NICKSERV_ENABLED
+            for i, line in enumerate(lines):
+                if 'BLACKBOT_NICKSERV_ENABLED' in line:
+                    insert_index = i + 1
+                    break
+
+        if insert_index is None:
+            print_warning(f"⚠️  Could not find insertion point in {config.name} .env")
+            return False
+
+        # Construiește setările noi
+        new_auth_section = """
+# QuakeNet Q Authentication
+BLACKBOT_QUAKENET_AUTH_ENABLED=false
+BLACKBOT_QUAKENET_USERNAME=
+BLACKBOT_QUAKENET_PASSWORD=
+
+# Undernet X Authentication
+BLACKBOT_UNDERNET_AUTH_ENABLED=false
+BLACKBOT_UNDERNET_USERNAME=
+BLACKBOT_UNDERNET_PASSWORD=
+    """
+
+        # Inserează
+        lines.insert(insert_index, new_auth_section)
+
+        # Scrie înapoi
+        new_content = '\n'.join(lines)
+
+        # Backup
+        backup_file = env_file.with_suffix('.env.pre-migration')
+        if not backup_file.exists():  # Nu suprascrie backup-uri existente
+            with open(backup_file, 'w', encoding='utf-8') as f:
+                f.write(content)
+
+        with open(env_file, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+
+        print_success(f"✅ Migrated {config.name} .env")
+        print_info(f"   Backup saved: {backup_file.name}")
+
+        return True
+
+
     def _generate_env_content(self, config: BotInstanceConfig) -> str:
         """Generate .env file content with all supported variables"""
         servers_str = ','.join(config.servers)
@@ -581,16 +940,62 @@ BLACKBOT_CHANNELS={channels_str}
 # Authentication & Security
 # ═══════════════════════════════════════════════════════════════════
 
+# NickServ Authentication (Libera.Chat, OFTC, etc.)
 BLACKBOT_NICKSERV_ENABLED={str(config.nickserv_enabled).lower()}
 BLACKBOT_NICKSERV_NICK=NickServ
 BLACKBOT_NICKSERV_BOTNICK={config.nickname}
 """
 
-        # Add password only if set (security)
+        # ✅ ÎNTOTDEAUNA scrie parola (goală sau completată)
         if config.nickserv_enabled and config.nickserv_password:
             env_content += f"BLACKBOT_NICKSERV_PASSWORD={config.nickserv_password}\n"
+        else:
+            env_content += "BLACKBOT_NICKSERV_PASSWORD=\n"
 
         env_content += f"""
+# QuakeNet Q Authentication
+BLACKBOT_QUAKENET_AUTH_ENABLED={str(config.quakenet_auth_enabled).lower()}
+"""
+
+        # ✅ ÎNTOTDEAUNA scrie username și password (goale sau completate)
+        if config.quakenet_auth_enabled and config.quakenet_username:
+            env_content += f"BLACKBOT_QUAKENET_USERNAME={config.quakenet_username}\n"
+        else:
+            env_content += "BLACKBOT_QUAKENET_USERNAME=\n"
+
+        if config.quakenet_auth_enabled and config.quakenet_password:
+            env_content += f"BLACKBOT_QUAKENET_PASSWORD={config.quakenet_password}\n"
+        else:
+            env_content += "BLACKBOT_QUAKENET_PASSWORD=\n"
+
+        env_content += f"""
+# Undernet X Authentication
+BLACKBOT_UNDERNET_AUTH_ENABLED={str(config.undernet_auth_enabled).lower()}
+"""
+
+        # ✅ ÎNTOTDEAUNA scrie username și password (goale sau completate)
+        if config.undernet_auth_enabled and config.undernet_username:
+            env_content += f"BLACKBOT_UNDERNET_USERNAME={config.undernet_username}\n"
+        else:
+            env_content += "BLACKBOT_UNDERNET_USERNAME=\n"
+
+        if config.undernet_auth_enabled and config.undernet_password:
+            env_content += f"BLACKBOT_UNDERNET_PASSWORD={config.undernet_password}\n"
+        else:
+            env_content += "BLACKBOT_UNDERNET_PASSWORD=\n"
+
+        env_content += f"""
+# User Modes (set after connection)
+"""
+
+        # ✅ ÎNTOTDEAUNA scrie user_modes (gol sau completat)
+        if config.user_modes:
+            env_content += f"BLACKBOT_USER_MODES={config.user_modes}\n"
+        else:
+            env_content += "BLACKBOT_USER_MODES=\n"
+
+        env_content += f"""
+        
 # ═══════════════════════════════════════════════════════════════════
 # Database & Persistence  
 # ═══════════════════════════════════════════════════════════════════
