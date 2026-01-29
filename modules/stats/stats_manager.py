@@ -17,6 +17,12 @@ from pathlib import Path
 from core.log import get_logger
 import socket
 
+from modules.stats.stats_aggregator import (
+    run_aggregation_periodic,
+    run_pruning_periodic,
+    get_pruner,
+)
+
 logger = get_logger("stats_manager")
 
 
@@ -47,6 +53,7 @@ class StatsManager:
 
         self.aggregator_worker = None
         self.api_worker = None
+        self.pruner_worker = None
 
         self.is_running = False
         self.dependencies_ok = False
@@ -141,8 +148,15 @@ class StatsManager:
                 self.api_worker.stop()
             except Exception:
                 pass
+
+        if self.pruner_worker and hasattr(self.pruner_worker, 'stop'):
+            try:
+                self.pruner_worker.stop()
+            except:
+                pass
         self.aggregator_worker = None
         self.api_worker = None
+        self.pruner_worker = None
 
     def _schedule_deferred_init(self, bot_instance):
         def deferred_init_worker():
@@ -206,6 +220,10 @@ class StatsManager:
             if self.config.is_aggregator_enabled():
                 if not self._start_aggregator():
                     logger.warning("Failed to start aggregator")
+
+                    # Start pruner
+            if not self.start_pruner():
+                logger.warning("Failed to start pruner worker (non-critical)")
 
             if self.config.is_api_enabled():
                 if not self._start_api_server():
@@ -290,6 +308,47 @@ class StatsManager:
             logger.error(f"Failed to start aggregator: {e}", exc_info=True)
             return False
 
+    def start_pruner(self):
+
+        try:
+            # Check if enabled
+            if not self.config.is_pruning_enabled():
+                logger.info("Database pruning is disabled in config")
+                return False
+
+            # Stop existing pruner if running
+            if self.pruner_worker and getattr(self.pruner_worker, "is_alive", lambda: False)():
+                logger.warning("Pruner already running, stopping old instance...")
+                try:
+                    self.pruner_worker.stop()
+                    time.sleep(1)
+                except:
+                    pass
+
+            from core.threading_utils import ThreadWorker
+
+            # Get config
+            interval_days = self.config.get_pruning_interval_days()
+            keep_months = self.config.get_pruning_keep_months()
+
+            logger.info(f"Starting database pruner (interval: {interval_days} days, keep: {keep_months} months)")
+
+            # Create worker
+            self.pruner_worker = ThreadWorker(
+                target=lambda: run_pruning_periodic(self.sql, interval_days, keep_months),
+                name="stats_pruner",
+                supervise=True
+            )
+
+            self.pruner_worker.start()
+
+            logger.info("✅ Database pruner started successfully")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to start database pruner: {e}", exc_info=True)
+            return False
+
     def _is_port_free(self, host: str, port: int) -> bool:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -368,6 +427,14 @@ class StatsManager:
                 logger.info("✓ Stopped aggregator")
             except Exception as e:
                 logger.error(f"Error stopping aggregator: {e}")
+
+        # Stop pruner
+        if self.pruner_worker and getattr(self.pruner_worker, "is_alive", lambda: False)():
+            try:
+                self.pruner_worker.stop()
+                logger.info("Database pruner stopped")
+            except Exception as e:
+                logger.error(f"Error stopping pruner: {e}")
 
         if self.api_worker:
             try:

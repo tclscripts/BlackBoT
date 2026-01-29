@@ -27,6 +27,13 @@ class StatsConfig:
         'flush_interval': 5.0,  # seconds
         'archive_days': 180,  # Keep events for 6 months
         'max_events_per_aggregation': 5000,
+        'pruning_enabled': True,  # Enable/disable automatic pruning
+        'pruning_interval_days': 7,  # Run pruning every X days
+        'pruning_keep_months': 6,  # Keep events for X months
+        'pruning_batch_size': 1000,  # Delete in batches of X rows
+        'pruning_max_per_run': 100000,  # Max rows to delete per run
+        'pruning_require_aggregated': True,  # Only delete if aggregated
+        'pruning_dry_run': False,  # Set to True to only simulate
     }
     
     def __init__(self, config_file='stats_config.json'):
@@ -60,6 +67,13 @@ class StatsConfig:
             'STATS_AGGREGATOR_INTERVAL': ('aggregator_interval', int),
             'STATS_BATCH_SIZE': ('batch_size', int),
             'STATS_FLUSH_INTERVAL': ('flush_interval', float),
+            'STATS_PRUNING_ENABLED': ('pruning_enabled', lambda x: x.lower() == 'true'),
+            'STATS_PRUNING_INTERVAL_DAYS': ('pruning_interval_days', int),
+            'STATS_PRUNING_KEEP_MONTHS': ('pruning_keep_months', int),
+            'STATS_PRUNING_BATCH_SIZE': ('pruning_batch_size', int),
+            'STATS_PRUNING_MAX_PER_RUN': ('pruning_max_per_run', int),
+            'STATS_PRUNING_REQUIRE_AGGREGATED': ('pruning_require_aggregated', lambda x: x.lower() == 'true'),
+            'STATS_PRUNING_DRY_RUN': ('pruning_dry_run', lambda x: x.lower() == 'true'),
         }
         
         for env_var, (config_key, converter) in env_mappings.items():
@@ -105,6 +119,26 @@ class StatsConfig:
     def is_aggregator_enabled(self):
         """Check if aggregator is enabled"""
         return self.config.get('aggregator_enabled', True) and self.is_enabled()
+
+    def is_pruning_enabled(self):
+        """Check if aggregator is enabled"""
+        return self.config.get('pruning_enabled', True) and self.is_enabled()
+
+    def get_pruning_interval_days(self):
+        """Get pruning interval in days"""
+        return self.config.get('pruning_interval_days', 7)
+
+    def get_pruning_keep_months(self):
+        """Get how many months to keep"""
+        return self.config.get('pruning_keep_months', 6)
+
+    def get_pruning_batch_size(self):
+        """Get pruning batch size"""
+        return self.config.get('pruning_batch_size', 1000)
+
+    def get_pruning_max_per_run(self):
+        """Get max rows to delete per run"""
+        return self.config.get('pruning_max_per_run', 100000)
     
     def get_api_port(self):
         """Get API port"""
@@ -154,6 +188,13 @@ def create_default_config_file():
             'batch_size': 'Număr de evenimente per batch',
             'flush_interval': 'Interval flush în secunde',
             'archive_days': 'Păstrează evenimente X zile (cleanup automat)',
+            'pruning_enabled': 'Enable/disable automatic database pruning',
+            'pruning_interval_days': 'Interval de pruning în zile (7 = săptămânal)',
+            'pruning_keep_months': 'Păstrează evenimente din ultimele X luni (6 = 6 luni)',
+            'pruning_batch_size': 'Șterge în batch-uri de X rânduri (pentru performance)',
+            'pruning_max_per_run': 'Maximum de rânduri șterse per rulare (safety)',
+            'pruning_require_aggregated': 'Șterge doar dacă datele sunt agregate',
+            'pruning_dry_run': 'Dacă True, doar simulează ștergerea (nu șterge efectiv)',
         },
         **config.DEFAULTS
     }

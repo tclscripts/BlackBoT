@@ -109,7 +109,6 @@ from core.cache_manager import (
     LoggedUsersCache,
     KnownUsersCache,
     HostToNicksCache,
-    get_cache_statistics_report
 )
 from core.monitor_client import ensure_enrollment, send_heartbeat, send_monitor_offline
 from core.log import get_logger, install_excepthook, log_session_banner
@@ -825,8 +824,6 @@ class Bot(irc.IRCClient):
         :param channel: Canalul specific (pentru PART/KICK). None pentru QUIT (toate).
         :param is_quit: Dacă e True, șterge userul de peste tot (QUIT).
         """
-        # 1. Curățare CHANNEL_DETAILS (Lista mare)
-        # Folosim o listă nouă prin filtrare (mai rapid și sigur decât remove în buclă)
         if is_quit:
             # Scoatem userul de peste tot
             self.channel_details = [
@@ -834,13 +831,10 @@ class Bot(irc.IRCClient):
                 if len(row) > 1 and row[1] != nick
             ]
         elif channel:
-            # Scoatem userul doar de pe canalul specificat
             self.channel_details = [
                 row for row in self.channel_details
                 if not (len(row) > 1 and row[0] == channel and row[1] == nick)
             ]
-
-        # 2. Curățare KNOWN_USERS (Set)
         if is_quit:
             self.known_users = {
                 (c, n) for (c, n) in self.known_users if n != nick
@@ -857,8 +851,6 @@ class Bot(irc.IRCClient):
                     nicks.discard(nick)
                     if not nicks:  # Dacă lista e goală, marcăm hostul pentru ștergere
                         empty_hosts.append(host)
-
-            # Ștergem cheile goale ca să nu ocupăm memorie degeaba
             for host in empty_hosts:
                 del self.host_to_nicks[host]
 
@@ -869,17 +861,8 @@ class Bot(irc.IRCClient):
                 # Curățăm nick-ul din setul de nicks al userului
                 if "nicks" in data and nick in data["nicks"]:
                     data["nicks"].discard(nick)
-
-                # Dacă nick-ul principal a ieșit și nu mai are alte nick-uri, delogăm?
-                # Aici e discutabil. De obicei păstrăm sesiunea un timp,
-                # dar curățarea setului 'nicks' e obligatorie.
                 if data.get("nick") == nick:
-                    # Putem lăsa sesiunea activă (ghost session) sau o resetăm
                     pass
-
-        # 5. Curățare User Cache (ID-uri)
-        # Cache-ul e (nick, host) -> id.
-        # La QUIT, userul pleacă, deci putem șterge intrările cu nick-ul lui.
         if is_quit:
             keys_to_del = [k for k in self.user_cache.keys() if k[0] == nick]
             for k in keys_to_del:
@@ -900,9 +883,6 @@ class Bot(irc.IRCClient):
                         ident, host = user.split('!', 1)[1].split('@', 1)
                     except Exception:
                         ident, host = None, None
-
-                # SEMNĂTURA CORECTĂ:
-                # on_quit(sql, bot_id, nick, message, ident=None, host=None)
                 seen.on_quit(
                     self.sql,
                     self.botId,
@@ -1022,7 +1002,6 @@ class Bot(irc.IRCClient):
         if hasattr(self, 'ban_expiration_manager'):
             try:
                 self.ban_expiration_manager.stop()
-                logger.info("🛑 Ban expiration manager stopped")
             except Exception as e:
                 logger.error(f"Error stopping ban manager: {e}")
 
@@ -1043,10 +1022,6 @@ class Bot(irc.IRCClient):
 
         # Cancel timers
         self._cancel_all_timers()
-
-        logger.info(
-            "Heartbeat & per-connection workers stopped; global workers kept alive."
-        )
 
     # --- Conexiune socket Twisted ---
     def connectionMade(self):
@@ -1083,7 +1058,6 @@ class Bot(irc.IRCClient):
         if hasattr(self, "rejoin_pending") and channel in self.rejoin_pending:
             del self.rejoin_pending[channel]
 
-        # ✅ Reset rejoin backoff state (dacă ai implementat kickedFrom cu _rejoin_state)
         if hasattr(self, "_rejoin_state") and isinstance(self._rejoin_state, dict):
             st = self._rejoin_state.get(channel)
             if st:
