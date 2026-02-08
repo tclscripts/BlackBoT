@@ -51,6 +51,7 @@ class HybridBlackBotLauncher:
 
     def __init__(self, base_dir: str = "."):
         self.base_dir = Path(base_dir).resolve()
+        self.requirements_file = self.base_dir / "requirements.txt"
 
         possible_venvs = ["environment", ".venv", "venv"]
         self.venv_dir = None
