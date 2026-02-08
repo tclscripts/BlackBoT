@@ -1059,6 +1059,24 @@ class SQL:
                                 INTEGER -- last JOIN timestamp (persisted)
                             );
                             """)
+        # Migration: Add join_ts column if it doesn't exist (for old databases)
+        # CRITICAL: Must check BEFORE attempting ALTER to avoid duplicate column error
+        try:
+            # Check if column exists using PRAGMA
+            columns_check = self.sqlite_select("PRAGMA table_info(SEEN)", ())
+            if columns_check:
+                column_names = [row[1] for row in columns_check]
+
+                # Only add if missing
+                if 'join_ts' not in column_names:
+                    logger.info("🔄 Migrating SEEN table: adding join_ts column")
+                    self.sqlite3_execute("ALTER TABLE SEEN ADD COLUMN join_ts INTEGER")
+                    logger.info("✅ SEEN migration complete")
+                else:
+                    logger.debug("SEEN table already has join_ts column, skipping migration")
+        except Exception as e:
+            # Log but don't crash - table might already be correct
+            logger.warning(f"SEEN migration check failed (non-critical): {e}")
         self.sqlite3_execute("""
                             CREATE UNIQUE INDEX IF NOT EXISTS idx_seen_unique
                                 ON SEEN(botId, channel, nick COLLATE NOCASE);

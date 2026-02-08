@@ -101,7 +101,6 @@ from core import Variables as v
 from core.commands_map import command_definitions
 from core.threading_utils import ThreadWorker
 from core.sql_manager import SQLManager
-from core import seen
 from core.threading_utils import get_event
 from core.dcc import DCCManager
 from core.optimized_cache import SmartTTLCache
@@ -284,6 +283,15 @@ class Bot(irc.IRCClient):
 
         # Initialize ban expiration manager
         self.ban_expiration_manager = BanExpirationManager(self)
+
+        # Initialize plugin system
+        try:
+            from core.plugin_manager import init_plugin_system
+            self.plugin_manager = init_plugin_system(self)
+            logger.info("✅ Plugin system initialized")
+        except Exception as e:
+            logger.error(f"Failed to init plugin system: {e}")
+
 
     def _cooldown_ok(self, key: str, seconds: float) -> bool:
         """
@@ -872,28 +880,25 @@ class Bot(irc.IRCClient):
         nick = user.split('!', 1)[0] if user else ""
         logger.info(f"⬅️ QUIT: {nick} ({quitMessage})")
 
-        # Logica SEEN
-        if hasattr(seen, 'on_quit'):
-            try:
-                ident = None
-                host = None
+        # Plugin hooks (QUIT)
+        pm = getattr(self, "plugin_manager", None)
+        if pm:
+            ident = None
+            host = None
 
-                if user and '!' in user and '@' in user:
-                    try:
-                        ident, host = user.split('!', 1)[1].split('@', 1)
-                    except Exception:
-                        ident, host = None, None
-                seen.on_quit(
-                    self.sql,
-                    self.botId,
-                    nick,
-                    quitMessage,
-                    ident=ident,
-                    host=host
-                )
-            except Exception:
-                # seen nu trebuie să poată crăpa botul
-                pass
+            if user and "!" in user and "@" in user:
+                try:
+                    ident, host = user.split("!", 1)[1].split("@", 1)
+                except Exception:
+                    ident, host = None, None
+
+            pm.dispatch_hook(
+                "QUIT",
+                nick=nick,
+                ident=ident,
+                host=host,
+                message=quitMessage
+            )
 
         # 🧹 CURĂȚENIE GENERALĂ
         self._clean_user_memory(nick, is_quit=True)
@@ -1202,8 +1207,16 @@ class Bot(irc.IRCClient):
         ident = user.split('!')[1].split('@')[0] if '!' in user and '@' in user else ''
         host = user.split('@')[1] if '@' in user else ''
 
-        if hasattr(seen, 'on_join'):
-            seen.on_join(self.sql, self.botId, channel, user, ident, host)
+        # Plugin hooks (JOIN)
+        pm = getattr(self, "plugin_manager", None)
+        if pm:
+            pm.dispatch_hook(
+                "JOIN",
+                channel=channel,
+                nick=nick,
+                ident=ident,
+                host=host
+            )
 
         if nick == self.nickname:
             return
@@ -1286,8 +1299,33 @@ class Bot(irc.IRCClient):
         """
         Apelată când un user (sau botul) părăsește un canal (PART).
         """
+        # Parse ident/host dacă sunt disponibile
+        ident = None
+        host = None
         # Parsare nick
         nick = user.split('!')[0] if '!' in user else user
+
+        if "!" in user and "@" in user:
+            try:
+                ident, host = user.split("!", 1)[1].split("@", 1)
+            except Exception:
+                ident, host = None, None
+
+        # Plugin hooks (PART)
+        pm = getattr(self, "plugin_manager", None)
+        if pm:
+            try:
+                # dacă ai reason la PART în alt parametru, pune-l aici.
+                pm.dispatch_hook(
+                    "PART",
+                    channel=channel,
+                    nick=nick,
+                    ident=ident,
+                    host=host,
+                    reason="",  # dacă ai mesajul de PART, înlocuiește aici
+                )
+            except Exception as e:
+                logger.error(f"Plugin hook PART error: {e}")
 
         logger.info(f"⬅️ PART (Left): {nick} from {channel}")
 
@@ -1396,15 +1434,20 @@ class Bot(irc.IRCClient):
                 host = row[3] or ""
                 break
 
-        # 2. Notăm evenimentul în baza de date (SEEN)
-        if hasattr(seen, 'on_kick'):
+        pm = getattr(self, "plugin_manager", None)
+        if pm:
             try:
-                seen.on_kick(
-                    self.sql, self.botId, channel, kickee, kicker_nick, message,
-                    ident=ident, host=host
+                pm.dispatch_hook(
+                    "KICK",
+                    channel=channel,
+                    target=kickee,  # nick-ul celui dat afară
+                    kicker=kicker_nick,  # cine a dat kick
+                    message=message,  # reason/text
+                    ident=ident,
+                    host=host,
                 )
             except Exception as e:
-                logger.error(f"Seen kick error: {e}")
+                logger.error(f"Plugin hook KICK error: {e}")
 
         # 3. Log
         logger.info(f"👢 KICK: {kickee} was kicked from {channel} by {kicker_nick} ({message})")
@@ -1572,99 +1615,107 @@ class Bot(irc.IRCClient):
 
         logger.warning(f"[rejoin] Scheduled JOIN for {channel} in {delay:.1f}s (attempt {st['attempts']})")
 
+    def irc_NICK(self, prefix, params):
+        """
+        Gestionează schimbarea de nume la nivel raw.
+        Actualizează channel_details ȘI self.nickname înainte de orice altceva.
+        """
+        old_nick = prefix.split('!')[0]
+        new_nick = params[0]
 
-    def userRenamed(self, oldnick, newnick):
-        logger.info(f"🔄 Nick change detected: {oldnick} → {newnick}")
+        try:
+            # 1. ACTUALIZARE CRITICĂ ÎN MEMORIE (channel_details)
+            affected_channels = []
+            old_lower = old_nick.lower()
 
-        # 1. ACTUALIZARE SEEN
-        if hasattr(seen, 'on_nick_change'):
+            for row in self.channel_details:
+                # row: [channel, nick, ident, host, privs, realname, userId]
+                if len(row) > 1 and row[1].lower() == old_lower:
+                    row[1] = new_nick
+                    affected_channels.append(row[0])
+
+            # 2. DETECTARE SELF-RENAME & SYNC
+            if old_nick.lower() == self.nickname.lower():
+                self.nickname = new_nick
+                if hasattr(self, 'factory'):
+                    self.factory.nickname = new_nick
+
+                # Forțăm sincronizarea OP-ului
+                for chan in affected_channels:
+                    self.sendLine(f"WHO {chan}")  # Va declanșa irc_unknown -> Update OP
+                    if hasattr(self, "_refresh_channel_state"):
+                        self._debounce(f"refresh:{chan}", 2.0, self._refresh_channel_state, chan)
+
+            # 3. APELĂM LOGICA SECUNDARĂ (Pluginuri, Cache, Banuri)
+            # [FIX ERROR]: Nu mai trimitem affected_channels aici pentru că modulul stats nu acceptă 3 argumente
+            self.userRenamed(old_nick, new_nick)
+
+        except Exception as e:
+            logger.error(f"Error in irc_NICK: {e}", exc_info=True)
+
+    def userRenamed(self, oldnick, newnick, affected_channels=None):
+        """
+        Se ocupă de pluginuri, cache-uri și ban checks.
+        """
+        logger.info(f"🔄 User Renamed: {oldnick} → {newnick}")
+
+        # 1. Plugin Hooks
+        pm = getattr(self, "plugin_manager", None)
+        if pm:
             try:
-                seen.on_nick_change(self.sql, self.botId, oldnick, newnick)
-            except Exception as e:
-                logger.error(f"Seen update failed: {e}")
+                pm.dispatch_hook("NICK", oldnick=oldnick, newnick=newnick)
+            except:
+                pass
 
-        # ---------------------------------------------------------
-        # 2. CRITIC: Dacă BOTUL și-a schimbat numele
-        # ---------------------------------------------------------
-        if oldnick == self.nickname:
-            self.nickname = newnick
-            # Actualizăm și în factory ca să știe la reconectare
-            if hasattr(self, 'factory'):
-                self.factory.nickname = newnick
-            logger.info(f"🤖 MY NICKNAME UPDATED: {self.nickname}")
+        old_lower = oldnick.lower()
+        new_lower = newnick.lower()
 
-        # 3. Actualizare CHANNEL_DETAILS (Lista principală de useri pe canale)
-        # Iterăm și actualizăm peste tot unde apare vechiul nick
-        # Colectăm canalele unde e userul pentru a verifica banurile ulterior
-        affected_channels = []
+        # 2. Actualizare Cache-uri Secundare
 
-        for row in self.channel_details:
-            # row structure: [channel, nick, ident, host, ...]
-            if len(row) > 1 and row[1] == oldnick:
-                row[1] = newnick
-                affected_channels.append((row[0], row[2], row[3]))  # channel, ident, host
-
-        # 4. Actualizare KNOWN_USERS (Set-ul de acces rapid)
-        # Reconstruim setul pentru a elimina oldnick și a adăuga newnick
-        if (any(k[1] == oldnick for k in self.known_users)):
+        # Known Users - Reconstruim setul
+        if any(k[1].lower() == old_lower for k in self.known_users):
             new_known = set()
             for chan, nick in self.known_users:
-                if nick == oldnick:
+                if nick.lower() == old_lower:
                     new_known.add((chan, newnick))
                 else:
                     new_known.add((chan, nick))
             self.known_users = new_known
 
-        # 5. Actualizare CACHE (User ID cache)
-        # Trebuie să mutăm userId-ul de pe cheia veche pe cheia nouă
-        keys_to_update = []
-        for key, uid in self.user_cache.items():
-            # key este tuple (nick, host)
-            if key[0] == oldnick:
-                keys_to_update.append((key, uid))
+        # User ID Cache
+        keys_to_update = [k for k in self.user_cache.keys() if k[0].lower() == old_lower]
+        for old_key in keys_to_update:
+            uid = self.user_cache.pop(old_key)
+            self.user_cache[(newnick, old_key[1])] = uid
 
-        for old_key, uid in keys_to_update:
-            old_n, host = old_key
-            # Ștergem intrarea veche
-            del self.user_cache[old_key]
-            # Adăugăm intrarea nouă
-            self.user_cache[(newnick, host)] = uid
-
-        # 6. Actualizare LOGGED_IN_USERS
-        # Aici e important să actualizăm și setul de 'nicks' dacă userul are mai multe
+        # Logged In Users
         for uid, data in self.logged_in_users.items():
-            # A) Dacă nick-ul principal era cel vechi
-            if data.get("nick") == oldnick:
+            if data.get("nick", "").lower() == old_lower:
                 data["nick"] = newnick
+            if "nicks" in data:
+                nicks_list = list(data["nicks"])
+                for n in nicks_list:
+                    if n.lower() == old_lower:
+                        data["nicks"].remove(n)
+                        data["nicks"].add(newnick)
 
-            # B) Actualizăm setul de nick-uri asociate sesiunii
-            if "nicks" in data and isinstance(data["nicks"], set):
-                if oldnick in data["nicks"]:
-                    data["nicks"].remove(oldnick)
-                    data["nicks"].add(newnick)
+        # 3. Verificare Banuri (Doar dacă nu e botul)
+        # [FIX ERROR]: Recalculăm affected_channels dacă lipsește
+        if not affected_channels:
+            affected_channels = []
+            # Deoarece irc_NICK a rulat deja, userul are deja numele NOU în listă
+            for row in self.channel_details:
+                if len(row) > 1 and row[1].lower() == new_lower:
+                    affected_channels.append(row[0])
 
-        # ---------------------------------------------------------
-        # 7. SECURITATE: Verificăm BAN-uri pentru noul Nickname
-        # ---------------------------------------------------------
-        # Dacă nu e botul cel care și-a schimbat numele, verificăm dacă noul nume e interzis
-        if newnick != self.nickname and hasattr(self, 'ban_expiration_manager'):
-            for channel, ident, host in affected_channels:
+        if newnick.lower() != self.nickname.lower() and hasattr(self, 'ban_expiration_manager'):
+            for chan in affected_channels:
                 try:
-                    # Adăugăm în coada de verificare (Fast Check)
-                    self._queue_pending_ban_check(
-                        channel,
-                        newnick,
-                        ident or "*",
-                        host or "*",
-                        None  # Realname nu se schimbă la rename, dar nu-l știm exact aici rapid
-                    )
-
-                    # Dacă avem OP, procesăm imediat
-                    if self._has_channel_op(channel):
-                        self._process_pending_ban_checks_for_channel(channel)
-
-                except Exception as e:
-                    logger.error(f"Failed to re-check bans for {newnick}: {e}")
+                    self._queue_pending_ban_check(chan, newnick, "*", "*", None)
+                    if self._has_channel_op(chan):
+                        self._process_pending_ban_checks_for_channel(chan)
+                except:
+                    pass
 
     # add channel to pending list
     def addChannelToPendingList(self, channel, reason):
@@ -2609,14 +2660,35 @@ class Bot(irc.IRCClient):
         self.sendLine(f"MODE {channel} {sign}{mode} {user}")
 
     def user_update_status(self, channel, nick, status_char, set_mode):
+        """
+        Actualizează permisiunile interne (ex: @, +) când se primește un MODE.
+        Folosește comparare case-insensitive pentru a evita desincronizarea.
+        """
+        target_nick = nick.lower()
+        target_chan = channel.lower()
+
         for user_details in self.channel_details:
-            if user_details[0] == channel and user_details[1] == nick:
+            # user_details structura: [channel, nick, ident, host, privs, ...]
+            if len(user_details) < 2:
+                continue
+
+            # Comparăm totul cu litere mici
+            if str(user_details[0]).lower() == target_chan and str(user_details[1]).lower() == target_nick:
                 current = user_details[4] or ""
+
                 if set_mode:
+                    # Adăugăm permisiunea dacă nu există deja
                     if status_char not in current:
                         user_details[4] = ''.join(sorted(current + status_char))
+                        # Logare debug doar pentru OP (ca să vedem că a mers)
+                        if status_char == '@' or status_char == '~':
+                            logger.info(f"👑 Privileges updated for {nick} on {channel}: +{status_char}")
                 else:
+                    # Scoatem permisiunea
                     user_details[4] = current.replace(status_char, '')
+                    if status_char == '@' or status_char == '~':
+                        logger.info(f"🔽 Privileges updated for {nick} on {channel}: -{status_char}")
+
                 return True
         return False
 
@@ -2848,6 +2920,22 @@ class Bot(irc.IRCClient):
         if self.check_private_flood_prot(lhost):
             return
 
+        # ✅ CHECK PLUGIN COMMANDS FIRST
+        if hasattr(self, 'plugin_manager'):
+            from core.plugin_manager import handle_plugin_command
+
+            # Calculate message pentru plugin
+            if is_nick_cmd:
+                joined_args = ' '.join(args[3:] if is_other_chan else args[2:])
+            elif is_other_chan or is_private:
+                joined_args = ' '.join(args[2:] if is_other_chan else args[1:])
+            else:
+                joined_args = ' '.join(args[1:])
+
+            # Try plugin commands first
+            if handle_plugin_command(self, target_channel, feedback, nick, host, command, joined_args):
+                return  # Command handled by plugin
+
         if self.valid_command(command):
             proc = self.get_process(command)
             if is_nick_cmd:
@@ -2987,6 +3075,16 @@ class Bot(irc.IRCClient):
         from twisted.internet import reactor
 
         logger.info(f"🔄 RESTART command received: {reason}")
+
+        try:
+            instance_name = os.getenv('BLACKBOT_INSTANCE_NAME', self.nickname)
+            env_file = Path(f"instances/{instance_name}/.env")
+            if env_file.exists():
+                logger.debug(f"🔄 Syncing config for instance: {instance_name}")
+                import core.config_updater as config_updater
+                config_updater.update_env_file(env_file, instance_name)
+        except Exception as e_cfg:
+            logger.debug(f"Config sync skipped: {e_cfg}")
 
         try:
             # Send QUIT
@@ -3494,26 +3592,46 @@ class Bot(irc.IRCClient):
         return False
 
     def user_is_op(self, nick, chan):
+        chan_lower = chan.lower()
+        nick_lower = nick.lower()
+
         for arr in self.channel_details:
-            if arr[0] == chan and arr[1] == nick and '@' in arr[4]:
+            if (arr[0].lower() == chan_lower and
+                    arr[1].lower() == nick_lower and
+                    '@' in (arr[4] or "")):
                 return True
         return False
 
     def user_is_halfop(self, nick, chan):
+        chan_lower = chan.lower()
+        nick_lower = nick.lower()
+
         for arr in self.channel_details:
-            if arr[0] == chan and arr[1] == nick and '%' in arr[4]:
+            if (arr[0].lower() == chan_lower and
+                    arr[1].lower() == nick_lower and
+                    '%' in (arr[4] or "")):
                 return True
         return False
 
     def user_is_admin(self, nick, chan):
+        chan_lower = chan.lower()
+        nick_lower = nick.lower()
+
         for arr in self.channel_details:
-            if arr[0] == chan and arr[1] == nick and '&' in arr[4]:
+            if (arr[0].lower() == chan_lower and
+                    arr[1].lower() == nick_lower and
+                    '&' in (arr[4] or "")):
                 return True
         return False
 
     def user_is_owner(self, nick, chan):
+        chan_lower = chan.lower()
+        nick_lower = nick.lower()
+
         for arr in self.channel_details:
-            if arr[0] == chan and arr[1] == nick and '~' in arr[4]:
+            if (arr[0].lower() == chan_lower and
+                    arr[1].lower() == nick_lower and
+                    '~' in (arr[4] or "")):
                 return True
         return False
 
@@ -3606,7 +3724,6 @@ class Bot(irc.IRCClient):
                 'core.SQL',
                 'core.Variables',
                 'core.environment_config',
-                'core.seen',
                 'core.dcc',
                 'core.log',
                 'core.nettools',
@@ -3665,12 +3782,31 @@ class Bot(irc.IRCClient):
             except Exception:
                 pass
 
+            # =================================================================
+            # FIX DUPLICATE CHANNEL_DETAILS
+            # =================================================================
+            self.send_message(feedback, "🧹 Flushing user memory & Resyncing...")
+
+            # 1. Ștergem listele vechi ca să nu se adauge peste ele
+            self.channel_details = []
+            self.known_users = set()
+            self.channel_info = {}
+            # (Nu ștergem logged_in_users ca să nu delogăm userii)
+
+            # 2. Cerem serverului lista proaspătă (WHO)
+            # Asta va repopula channel_details prin funcția irc_unknown (RPL_WHOREPLY)
+            if hasattr(self, 'channels'):
+                for chan in self.channels:
+                    self.sendLine(f"WHO {chan}")
+                    self.sendLine(f"MODE {chan}")
+            # =================================================================
+
             if failed:
                 self.send_message(feedback, f"ℹ️ Reloaded: {len(reloaded)} ok, {len(failed)} failed.")
             self.send_message(feedback, f"✅ Reloaded successfully. 🧹 Memory cleanup completed.")
 
         except Exception as e:
-            self.send_message(feedback, f"❌ Reload failed: {e}")
+            self.send_message(feedback, f"❌ Critical Rehash Error: {_short_tb()}")
 
     def auto_update_check_loop(self):
         import core.update as update
@@ -3679,10 +3815,17 @@ class Bot(irc.IRCClient):
             try:
                 if not s.autoUpdateEnabled:
                     break
-                local_version = update.read_local_version()
+                startup_version = self.version
+                disk_version = update.read_local_version()
                 remote_version = update.fetch_remote_version()
-                if remote_version and remote_version > local_version:
-                    logger.info(f"🔄 Update found → {remote_version} > {local_version}")
+                if disk_version > startup_version:
+                    logger.info(
+                        f"📄 Another instance updated {startup_version} → {disk_version}. Restarting to load new code...")
+                    self.restart("📄 Loading updated code from disk", from_autoupdate=True)
+                    break
+
+                if remote_version and remote_version > disk_version:
+                    logger.info(f"🔄 Update found → {remote_version} > {disk_version}")
                     update.update_from_github(self, "Auto-update")
                     self.restart("🔄 Auto-updated", from_autoupdate=True)
                     break
@@ -3693,21 +3836,25 @@ class Bot(irc.IRCClient):
     def _has_channel_op(self, channel: str) -> bool:
         try:
             mynick = self.nickname.lower()
+            channel_lower = channel.lower()
+
             for row in self.channel_details:
-                # [channel, nick, ident, host, priv, realname, userId]
                 if not isinstance(row, (list, tuple)) or len(row) < 5:
                     continue
-                if str(row[0]).lower() != channel.lower():
-                    continue
-                if str(row[1]).lower() != mynick:
-                    continue
-                priv = str(row[4] or "")
-                # @, ~, & etc – tratează ca „am op sau mai mult”
-                if any(p in priv for p in ("@", "~", "&", "q", "a")):
-                    return True
+
+                if (str(row[0]).lower() == channel_lower and
+                        str(row[1]).lower() == mynick):
+
+                    priv = str(row[4] or "")
+                    if any(p in priv for p in ("@", "~", "&")):
+                        return True
+                    else:
+                        # Bot găsit dar fără privilege - continuă la fallback
+                        break
         except Exception:
             pass
 
+        # Fallback: verifică channel_op_state
         return bool(self.channel_op_state.get(channel, False))
 
     def _prune_pending_ban_checks(self):
@@ -3833,6 +3980,25 @@ class Bot(irc.IRCClient):
 
         self.channel_op_state[channel] = bool(is_set)
 
+        try:
+            mynick_lower = self.nickname.lower()
+            for row in self.channel_details:
+                if (len(row) >= 5 and
+                        str(row[0]).lower() == channel.lower() and
+                        str(row[1]).lower() == mynick_lower):
+                    # row[4] = privileges string
+                    current_priv = str(row[4] or "")
+
+                    if is_set:
+                        if '@' not in current_priv:
+                            row[4] = '@' + current_priv
+                    else:
+                        if '@' in current_priv:
+                            row[4] = current_priv.replace('@', '')
+                    break
+        except Exception as e:
+            logger.error(f"Error updating channel_details for op change: {e}")
+
         if is_set:
             # ✅ debounce refresh modes/banlist (anti-burst)
             # dacă vine spam de MODE/+o, refresh se face o singură dată după 5s
@@ -3843,8 +4009,6 @@ class Bot(irc.IRCClient):
                 channel=channel
             )
 
-            # ✅ opțional: și asta poate fi debounced dacă face multe MODE/KICK/BAN checks
-            # (dacă vrei, îl punem sub debounce separat)
             self._debounce(
                 key=f"op_pending_checks:{channel}",
                 delay=1.0,
@@ -3853,142 +4017,81 @@ class Bot(irc.IRCClient):
             )
 
     def irc_MODE(self, prefix, params):
-        """
-        Handle MODE messages:
-          - detect when the bot gains/loses +o
-          - keep channel_info[channel]['modes'] updated live for simple channel modes
-          - keep channel_info[channel]['bans'] updated live for +b/-b
-
-        Example:
-          :Nick!user@host MODE #chan +nt
-          :Nick!user@host MODE #chan +b *!*@bad.host
-          :Nick!user@host MODE #chan -b *!*@bad.host
-          :Nick!user@host MODE #chan +o BlackBoT
-        """
         try:
-            if len(params) < 2:
-                return
-
-            target = params[0]
-            modes = params[1]
+            if len(params) < 2: return
+            target, modes = params[0], params[1]
             args = list(params[2:])
-
-            # doar canale
-            if not target.startswith("#"):
-                return
+            if not target.startswith("#"): return
 
             channel = target
-            mynick_l = (self.nickname or "").lower()
+            # Inițializare cache canal
+            if channel not in self.channel_info:
+                self.channel_info[channel] = {"modes": "", "bans": [], "topic": "", "last_updated": time.time()}
 
-            # init cache
-            if hasattr(self, "channel_info"):
-                if channel not in self.channel_info:
-                    self.channel_info[channel] = {
-                        "modes": "",
-                        "bans": [],
-                        "topic": "",
-                        "creation_time": None,
-                        "last_updated": time.time()
-                    }
-            else:
-                # dacă nu ai channel_info, măcar păstrezi partea de +o
-                pass
+            status_map = {'q': '~', 'a': '&', 'o': '@', 'h': '%', 'v': '+'}
+            # Moduri care consumă argumente
+            always_arg = set(status_map.keys()) | {'b', 'e', 'I', 'k'}
 
-            # moduri care au argument pe canale (incl. b)
-            modes_with_arg = set(["o", "h", "v", "q", "a", "k", "l", "b", "e", "I"])
-
-            # helper: normalize ban entry
-            def ban_mask_lower(entry):
-                if isinstance(entry, dict):
-                    return (entry.get("mask") or "").lower()
-                return str(entry).lower()
-
-            # 1) trecere: procesează toate modurile cu argument (în special +o pt noi și +b/-b)
             adding = True
-            arg_i = 0
+            current_modes = list((self.channel_info[channel].get("modes") or "").replace("+", ""))
 
             for ch in modes:
-                if ch == "+":
-                    adding = True
-                    continue
-                if ch == "-":
-                    adding = False
-                    continue
+                if ch == "+": adding = True; continue
+                if ch == "-": adding = False; continue
 
-                if ch in modes_with_arg:
-                    if arg_i >= len(args):
-                        break
-                    arg = args[arg_i]
-                    arg_i += 1
+                param = None
+                takes_arg = (ch in always_arg) or (ch == 'l' and adding)
 
-                    # detect self +o/-o
-                    if ch == "o" and arg.lower() == mynick_l:
-                        try:
-                            self._on_self_op_mode(channel, adding)
-                        except Exception:
-                            pass
+                if takes_arg:
+                    if args:
+                        param = args.pop(0)
+                    else:
+                        continue
 
+                # 1. Actualizare Status User (+o, +v, etc)
+                if ch in status_map and param:
+                    # Actualizăm statusul intern
+                    self.user_update_status(channel, param, status_map[ch], adding)
+
+                    # DETECTARE SELF-OP (Când primește botul OP)
+                    if ch == "o" and param.lower() == self.nickname.lower():
                         if adding:
                             logger.info(f"[mode] I GOT +o on {channel}")
+
+                            # --- AICI ESTE FIX-UL PENTRU BANURI ---
+                            # Imediat ce avem OP, procesăm coada de banuri
+                            try:
+                                if hasattr(self, '_process_pending_ban_checks_for_channel'):
+                                    logger.info(f"🔨 OP received on {channel}. Processing pending bans...")
+                                    self._process_pending_ban_checks_for_channel(channel)
+                            except Exception as e:
+                                logger.error(f"Failed to process pending bans on OP: {e}")
+                            # --------------------------------------
+
                         else:
                             logger.info(f"[mode] I LOST +o on {channel}")
 
-                    # live ban add/remove
-                    if ch == "b" and hasattr(self, "channel_info"):
-                        bans = self.channel_info[channel].setdefault("bans", [])
-
-                        if adding:
-                            # evită duplicate după mask
-                            if not any(ban_mask_lower(x) == arg.lower() for x in bans):
-                                bans.append({"mask": arg, "setter": "unknown", "timestamp": None})
-                        else:
-                            self.channel_info[channel]["bans"] = [
-                                x for x in bans if ban_mask_lower(x) != arg.lower()
-                            ]
-
-                        self.channel_info[channel]["last_updated"] = time.time()
-
-            # 2) a doua trecere: actualizează modurile simple (fără argument)
-            if hasattr(self, "channel_info"):
-                current_modes = (self.channel_info[channel].get("modes") or "").replace("+", "")
-                mode_list = list(current_modes)
-
-                adding = True
-                arg_i = 0
-
-                for ch in modes:
-                    if ch == "+":
-                        adding = True
-                        continue
-                    if ch == "-":
-                        adding = False
-                        continue
-
-                    # dacă are argument, consumă argumentul dar NU îl pui în mode_list
-                    if ch in modes_with_arg:
-                        if arg_i < len(args):
-                            arg_i += 1
-                        continue
-
-                    # mod simplu: aplică +/- în lista de moduri
+                # 2. Banuri (+b)
+                elif ch == "b" and param:
+                    bans = self.channel_info[channel]["bans"]
+                    pl = param.lower()
                     if adding:
-                        if ch not in mode_list:
-                            mode_list.append(ch)
+                        if not any((x.get("mask") or "").lower() == pl for x in bans):
+                            bans.append({"mask": param, "setter": "unknown", "timestamp": None})
                     else:
-                        if ch in mode_list:
-                            mode_list.remove(ch)
+                        self.channel_info[channel]["bans"] = [x for x in bans if (x.get("mask") or "").lower() != pl]
 
-                self.channel_info[channel]["modes"] = "+" + "".join(sorted(mode_list))
-                self.channel_info[channel]["last_updated"] = time.time()
+                # 3. Moduri canal simple (+nt, etc)
+                elif not takes_arg:
+                    if adding:
+                        if ch not in current_modes: current_modes.append(ch)
+                    else:
+                        if ch in current_modes: current_modes.remove(ch)
+
+            self.channel_info[channel]["modes"] = "+" + "".join(sorted(current_modes))
 
         except Exception as e:
-            if hasattr(self, "logger"):
-                self.logger.error(f"irc_MODE error: {e}", exc_info=True)
-            else:
-                try:
-                    logger.error(f"irc_MODE error: {e}", exc_info=True)
-                except Exception:
-                    pass
+            logger.error(f"irc_MODE error: {e}", exc_info=True)
 
     def channel_has_mode(self, channel, mode_char):
         """

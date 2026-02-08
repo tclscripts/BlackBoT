@@ -130,10 +130,6 @@ command_definitions = [
     {'name': 'status',
      'description': 'Show internal runtime info.\nUsage: !status\nOutput includes: uptime, CPU%, RSS memory, threads, Python and OS info.',
      'flags': 'Nn', 'id': '30'},
-
-    {'name': 'seen',
-     'description': 'Show last activity for a nick/host/pattern, or stats.\nUsage: !seen <nick|host|pattern>\nExtra: !seen -stats  — show DB statistics (global or per current channel).',
-     'flags': '-', 'id': '31'},
     {'name': 'help',
      'description': 'Show available commands depending on your access level.\n'
                     'Usage:\n'
@@ -187,12 +183,6 @@ command_definitions = [
     'id': '37'
 },
 {
-    'name': 'ip',
-    'description': f'Get IP/host information (ASN/ORG/LOC/TZ). Examples: {config.char}ip 8.8.8.8, {config.char}ip google.com',
-    'flags': '-',  # public
-    'id': '38'
-},
-{
     'name': 'asn',
     'description': f'ASN info. Basic: {config.char}asn AS32934  | Full: {config.char}asn AS32934 full',
     'flags': '-',  # public
@@ -242,15 +232,33 @@ command_definitions = [
     'id': '41'  # Adjust ID based on last ID in your commands_map.py
 },
 {
-        'name': 'weather',
-        'description': 'Weather check.\nUsage: !weather <city> OR !weather city <city> to save.',
-        'flags': '-',
-        'id': '42'
-    },
-    {
-        'name': 'w',
-        'description': 'Short alias for weather.\nUsage: !w <city>',
-        'flags': '-',
-        'id': '42' # Același ID ca weather, e doar un alias
-    }
+    'name': 'listplugins',
+    'description': 'List loaded plugins.\nUsage: !listplugins',
+    'flags': 'Nn',
+    'id': '43'
+},
+{
+    'name': 'loadplugin',
+    'description': 'Load a plugin module.\nUsage: !loadplugin <plugin_name>',
+    'flags': 'Nn',
+    'id': '44'
+},
+{
+    'name': 'unloadplugin',
+    'description': 'Unload a plugin module.\nUsage: !unloadplugin <plugin_name>',
+    'flags': 'Nn',
+    'id': '45'
+},
+{
+    'name': 'reloadplugin',
+    'description': 'Reload a plugin module.\nUsage: !reloadplugin <plugin_name>',
+    'flags': 'Nn',
+    'id': '46'
+},
+{
+    'name': 'plugininfo',
+    'description': 'Show plugin info.\nUsage: !plugininfo <plugin_name>',
+    'flags': 'Nn',
+    'id': '47'
+}
 ]
