@@ -49,7 +49,7 @@ command_definitions = [
 
     {'name': 'uptime',
      'description': 'Show how long the bot process has been running.\nUsage: !uptime',
-     'flags': '-', 'id': '10'},
+     'flags': 'Nn', 'id': '10'},
 
     {'name': 'channels',
      'description': 'List registered channels and their status.\nUsage: !channels\nOutput: #chan:ok | #chan:suspended | #chan:no-op | #chan:offline',
@@ -93,7 +93,7 @@ command_definitions = [
 
     {'name': 'add',
      'description': 'Grant flags to a user (global or per-channel).\nUsage: !add <nick> <flags> [#channel]\nNotes: Without #channel it applies globally; otherwise locally.',
-     'flags': 'NnmMAO', 'id': '21'},
+     'flags': 'NnmMA', 'id': '21'},
 
     {'name': 'userlist',
      'description': 'List users with access and their flags (global or per-channel).\nUsage: !userlist [#channel]\nNotes: Without channel shows global entries.',
@@ -101,11 +101,11 @@ command_definitions = [
 
     {'name': 'delacc',
      'description': 'Remove flags from a user (global or per-channel).\nUsage: !delacc <nick> [#channel]\nNotes: If channel is omitted, removes global flags.',
-     'flags': 'NnmMAO', 'id': '23'},
+     'flags': 'NnmMA', 'id': '23'},
 
     {'name': 'del',
      'description': 'Delete a user/account from the bot’s DB.\nUsage: !del <nick>\nWarning: This is irreversible.',
-     'flags': 'NnmMAO', 'id': '24'},
+     'flags': 'NnmMA', 'id': '24'},
 
     {'name': 'info',
      'description': 'Show info about a user or channel.\nUsage: !info <nick|#channel>\nNotes: Can include last seen data, modes, or registration state.',

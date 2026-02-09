@@ -337,7 +337,7 @@ class Plugin(PluginBase):
             return [f"❌ Error: {e}"]
 
     def _wildcard_to_like(self, s: str) -> str:
-        """
+        r"""
         Convert IRC-style wildcard pattern (* ?) to SQL LIKE pattern.
         Escapes %, _ and \ then replaces * -> %, ? -> _.
         """

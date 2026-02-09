@@ -612,7 +612,8 @@ def cmd_help(self, channel, feedback, nick, host, msg):
 
     override_channel = None
     tokens = msg.split()
-    # 1) !help #chan ...  (respectăm override-ul explicit)
+
+    # 1) !help #chan ...  (override explicit - doar în PM)
     if tokens and tokens[0].startswith("#") and channel.lower() == self.nickname.lower():
         override_channel = tokens[0]
         tokens = tokens[1:]
@@ -631,8 +632,6 @@ def cmd_help(self, channel, feedback, nick, host, msg):
     q = " ".join(tokens).strip().lower() if tokens else ""
 
     # ---------- PM/DCC local channel guess ----------
-    # Dacă suntem în PM/DCC (channel == numele botului) și NU avem override,
-    # încercăm să ghicim un canal comun cu userul.
     guessed_channel = None
     if not override_channel and channel.lower() == self.nickname.lower():
         try:
@@ -647,13 +646,32 @@ def cmd_help(self, channel, feedback, nick, host, msg):
 
     local_channel = override_channel or guessed_channel or channel
 
-    # obține userId (hostul e deja „îmbunătățit” de get_hostname pentru DCC)
+    # userId (logged-in if handle exists for this hostmask)
     handle_info = self.sql.sqlite_handle(self.botId, nick, host)
     userId = handle_info[0] if handle_info else None
+    is_logged = bool(userId)
 
     cmds = self.commands or []
 
-    # helper acces
+    # -------------------------
+    # Context checks (hello/pass/newpass/myset/uptime)
+    # -------------------------
+    boss_exists = False
+    try:
+        boss_exists = bool(self.sql.sqlite_isBossOwner(self.botId))
+    except Exception:
+        boss_exists = False
+
+    hello_disabled = bool(getattr(self, "unbind_hello", False))
+
+    user_has_password = False
+    if userId:
+        try:
+            user_has_password = bool(self.sql.sqlite_get_user_password(userId))
+        except Exception:
+            user_has_password = False
+
+    # helper acces pentru core commands (legacy list)
     def _has_access(cmd, local=False):
         flags = (cmd.get("flags") or "").strip()
         # Public
@@ -666,12 +684,337 @@ def cmd_help(self, channel, feedback, nick, host, msg):
         # global
         return self.sql.sqlite_has_access_flags(self.botId, userId, flags, channel=None)
 
-    # Dacă s-a cerut detaliu pentru o comandă: !help op / help op
-    if q and not q.startswith("#"):
-        target = next((c for c in cmds if c.get("name", "").lower() == q), None)
-        if not target:
-            self.send_message(feedback, f"❓ '{q}' command doesn't exist.")
+    def _is_cmd_visible(cmd_name: str) -> bool:
+        n = (cmd_name or "").lower()
+
+        # !hello nu apare daca exista BOSS owner sau hello e dezactivat (unbind)
+        if n == "hello":
+            if boss_exists or hello_disabled:
+                return False
+            return True
+
+        # !myset doar pentru cei logati
+        if n == "myset":
+            return is_logged
+
+        # !pass doar daca e logat si NU si-a setat parola
+        if n == "pass":
+            return is_logged and (not user_has_password)
+
+        # !newpass doar daca e logat
+        if n == "newpass":
+            return is_logged
+
+        # !uptime doar pentru global
+        if n == "uptime":
+            return bool(user_has_global)
+
+        return True
+
+    # -------------------------
+    # Plugin helpers
+    # -------------------------
+    pm = getattr(self, "plugin_manager", None)
+
+    # -------------------------
+    # Detectare "ori global ori local" pe USER
+    # -------------------------
+    GLOBAL_FLAGS = "Nnm"
+    LOCAL_FLAGS = "MAOVPB"
+
+    def _user_has_any_flag_sql(flags: str, scope_channel):
+        flags = (flags or "").strip()
+        if not flags or flags == "-":
+            return True
+        if userId is None:
+            return False
+
+        # OR logic: verifică fiecare flag separat
+        for f in flags:
+            try:
+                if self.sql.sqlite_has_access_flags(self.botId, userId, f, channel=scope_channel):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    user_has_global = _user_has_any_flag_sql(GLOBAL_FLAGS, scope_channel=None)
+    user_has_local = str(local_channel).startswith("#") and _user_has_any_flag_sql(LOCAL_FLAGS, scope_channel=local_channel)
+
+    # "ori global ori local" -> global prioritar
+    mode = "global" if user_has_global else ("local" if user_has_local else "none")
+
+    def _pm_has_access(flags: str) -> bool:
+        # global = vede/poate folosi toate comenzile (inclusiv modules)
+        if user_has_global:
+            return True
+        flags = (flags or "").strip()
+        if not flags or flags == "-":
+            return True
+        if userId is None:
+            return False
+        for f in flags:
+            try:
+                if self.check_access(local_channel if str(local_channel).startswith("#") else channel, userId, f):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _pm_resolve(cmd_name: str) -> str:
+        if not pm:
+            return cmd_name
+        try:
+            return pm.resolve_command_name(cmd_name)
+        except Exception:
+            return cmd_name
+
+    def _print_module_commands(mod_name: str) -> bool:
+        """Afișează comenzile dintr-un modul (plugin_name)."""
+        if not pm:
+            self.send_message(feedback, "❌ Plugin system not initialized.")
+            return True
+
+        by_plugin = {}
+        for cname, pcmd in (pm.commands or {}).items():
+            pname = getattr(pcmd, "plugin_name", "") or "unknown"
+            by_plugin.setdefault(pname, []).append(cname)
+
+        if mod_name not in by_plugin:
+            self.send_message(feedback, f"❓ module '{mod_name}' not found.")
+            return True
+
+        alias_map = {}
+        for a, canon in (pm.command_aliases or {}).items():
+            alias_map.setdefault(canon, []).append(a)
+
+        visible = []
+        for cname in sorted(by_plugin.get(mod_name, []), key=str.lower):
+            pcmd = pm.get_command(cname)
+            if not pcmd:
+                continue
+            if not _pm_has_access(getattr(pcmd, "flags", "-")):
+                continue
+            aliases = sorted(alias_map.get(cname, []), key=str.lower)
+            if aliases:
+                visible.append(f"{config.char}{cname}({','.join(config.char + x for x in aliases)})")
+            else:
+                visible.append(f"{config.char}{cname}")
+
+        if not visible:
+            self.send_message(feedback, f"⛔ No accessible commands in module '{mod_name}'.")
+            return True
+
+        line = f"🧩 Module '{mod_name}': " + sep.join(visible)
+        for part in self.split_irc_message_parts([line], separator=""):
+            self.send_message(feedback, part)
+        self.send_message(feedback, f"ℹ️ Detailed: {config.char}help <command>")
+        return True
+
+    # -------------------------
+    # 0) fără argument -> afișează ce ai voie să folosești (dinamic pe access)
+    # -------------------------
+    if not q:
+        public_names = []
+        restricted = []  # (cmd, entry)
+
+        for c in cmds:
+            name = c.get("name")
+            if not name:
+                continue
+
+            # ✅ vizibilitate contextuală
+            if not _is_cmd_visible(name):
+                continue
+
+            flags = (c.get("flags") or "").strip()
+            entry = f"{config.char}{name}"
+            if not flags or flags == "-":
+                public_names.append(entry)
+            else:
+                restricted.append((c, entry))
+
+        # 0a) Public
+        if public_names:
+            line = "📣 Public: " + sep.join(sorted(set(public_names), key=str.lower))
+            for part in self.split_irc_message_parts([line], separator=""):
+                self.send_message(feedback, part)
+
+        # 0b) Local (dacă are local sau global)
+        if str(local_channel).startswith("#") and mode in ("local", "global"):
+            local_list = []
+            for c, entry in restricted:
+                if mode == "local":
+                    if _has_access(c, local=True):
+                        local_list.append(entry)
+                else:  # mode == "global"
+                    # strict-canal = are local, dar NU are global
+                    if _has_access(c, local=True) and not _has_access(c, local=False):
+                        local_list.append(entry)
+
+            if local_list:
+                line = f"🏷️ Local ({local_channel}): " + sep.join(sorted(set(local_list), key=str.lower))
+                for part in self.split_irc_message_parts([line], separator=""):
+                    self.send_message(feedback, part)
+
+            # 0c) Global (doar dacă userul are global)
+        if mode == "global":
+            global_list = []
+            for c, entry in restricted:
+                if _has_access(c, local=False):
+                    global_list.append(entry)
+
+            if global_list:
+                line = "🌐 Global: " + sep.join(sorted(set(global_list), key=str.lower))
+                for part in self.split_irc_message_parts([line], separator=""):
+                    self.send_message(feedback, part)
+
+            # 0d) Modules (doar global)
+            if pm:
+                try:
+                    metas = pm.list_plugins()
+                    module_names = sorted([m.name for m in metas if getattr(m, "enabled", True)], key=str.lower)
+                except Exception:
+                    module_names = sorted(list(getattr(pm, "plugins", {}).keys()), key=str.lower)
+
+                if module_names:
+                    line = "📦 Modules: " + sep.join(module_names)
+                    for part in self.split_irc_message_parts([line], separator=""):
+                        self.send_message(feedback, part)
+                    self.send_message(feedback, f"ℹ️ Show module commands: {config.char}help module <name>")
+
+        # Hint-uri
+        cats = ["public"]
+        if str(local_channel).startswith("#") and mode in ("local", "global"):
+            cats.append("local")
+        if mode == "global":
+            cats += ["global", "modules"]
+
+        self.send_message(feedback, "📚 Categories: " + " | ".join(cats))
+        self.send_message(feedback, f"ℹ️ Details: {config.char}help <command>")
+        if channel.lower() == self.nickname.lower() and not override_channel:
+            self.send_message(feedback, f"ℹ️ For channel-scoped help: {config.char}help #channel local")
+        return
+
+    ql = q.strip().lower()
+
+    # -------------------------
+    # 1) CATEGORII
+    # -------------------------
+    if ql in ("modules", "plugins", "mods"):
+        if not pm:
+            self.send_message(feedback, "❌ Plugin system not initialized.")
             return
+
+        try:
+            metas = pm.list_plugins()
+            module_names = sorted([m.name for m in metas if getattr(m, "enabled", True)], key=str.lower)
+        except Exception:
+            module_names = sorted(list(getattr(pm, "plugins", {}).keys()), key=str.lower)
+
+        if module_names:
+            line = "📦 Modules: " + sep.join(module_names)
+            for part in self.split_irc_message_parts([line], separator=""):
+                self.send_message(feedback, part)
+
+        self.send_message(feedback, f"ℹ️ Show module commands: {config.char}help module <name>")
+        return
+
+    if ql.startswith("module "):
+        mod_name = ql.split(None, 1)[1].strip()
+        if not mod_name:
+            self.send_message(feedback, f"Usage: {config.char}help module <name>")
+            return
+        _print_module_commands(mod_name)
+        return
+
+    # public/local/global pentru core commands
+    if ql in ("public", "pub", "local", "global", "glob"):
+        public_names = []
+        restricted = []  # (cmd, entry)
+
+        for c in cmds:
+            name = c.get("name")
+            if not name:
+                continue
+
+            # ✅ vizibilitate contextuală
+            if not _is_cmd_visible(name):
+                continue
+
+            flags = (c.get("flags") or "").strip()
+            entry = f"{config.char}{name}"
+
+            if not flags or flags == "-":
+                public_names.append(entry)
+            else:
+                restricted.append((c, entry))
+
+        if ql in ("public", "pub"):
+            if public_names:
+                line = "📣 Public: " + sep.join(sorted(set(public_names), key=str.lower))
+                for part in self.split_irc_message_parts([line], separator=""):
+                    self.send_message(feedback, part)
+            return
+
+        if ql == "local":
+            if mode == "global" and not user_has_local:
+                self.send_message(feedback, f"ℹ️ You have global access but no specific local flags on {local_channel}.")
+
+            local_list = []
+            for c, entry in restricted:
+                if _has_access(c, local=True):
+                    local_list.append(entry)
+
+            if local_list:
+                line = f"🏷️ Local ({local_channel}): " + sep.join(sorted(set(local_list), key=str.lower))
+                for part in self.split_irc_message_parts([line], separator=""):
+                    self.send_message(feedback, part)
+            else:
+                self.send_message(feedback, f"ℹ️ No local commands available for {local_channel}.")
+            return
+
+        if ql in ("global", "glob"):
+            global_list = []
+            for c, entry in restricted:
+                if _has_access(c, local=False):
+                    global_list.append(entry)
+
+            if global_list:
+                line = "🌐 Global: " + sep.join(sorted(set(global_list), key=str.lower))
+                for part in self.split_irc_message_parts([line], separator=""):
+                    self.send_message(feedback, part)
+            else:
+                if mode == "local":
+                    self.send_message(feedback, f"ℹ️ You have local access. Try: {config.char}help local")
+                else:
+                    self.send_message(feedback, "ℹ️ No global commands available for your access level.")
+            return
+
+    # -------------------------
+    # 2) HELP detaliat
+    # -------------------------
+    # 2a) plugin command/alias
+    if pm:
+        canonical = _pm_resolve(ql)
+        plugin_cmd = pm.get_command(canonical) if hasattr(pm, "get_command") else None
+        if plugin_cmd:
+            try:
+                pm.send_command_help(self, feedback, local_channel, nick, host, ql)
+            except Exception:
+                descr = getattr(plugin_cmd, "description", "") or "No help available."
+                for line in [l.rstrip() for l in descr.splitlines() if l.strip()]:
+                    self.send_message(feedback, line)
+            return
+
+    # 2b) core command
+    target = next((c for c in cmds if c.get("name", "").lower() == ql), None)
+    if target:
+        # ✅ daca nu e vizibil in context, nu aratam help
+        if not _is_cmd_visible(target.get("name", "")):
+            self.send_message(feedback, f"⛔ You don't have access to '{target['name']}'.")
+            return
+
         if not (_has_access(target, local=True) or _has_access(target, local=False)):
             self.send_message(feedback, f"⛔ You don't have access to '{target['name']}'.")
             return
@@ -681,60 +1024,20 @@ def cmd_help(self, channel, feedback, nick, host, msg):
             self.send_message(feedback, prefix + line.strip())
         return
 
-    public_names, local_names, global_names = [], [], []
-    for c in cmds:
-        name = c.get("name")
-        if not name:
-            continue
-        flags = (c.get("flags") or "").strip()
-        entry = f"{config.char}{name}"
+    # 2c) fallback: modul
+    if pm:
+        try:
+            metas = pm.list_plugins()
+            module_names = {m.name for m in metas if getattr(m, "enabled", True)}
+        except Exception:
+            module_names = set(getattr(pm, "plugins", {}).keys())
 
-        # Public
-        if not flags or flags == "-":
-            public_names.append(entry)
-            continue
-        # Local (pe canalul dedus/explicit)
-        if _has_access(c, local=True):
-            local_names.append(entry)
-            continue
-        # Global
-        if _has_access(c, local=False):
-            global_names.append(entry)
+        if ql in module_names:
+            _print_module_commands(ql)
+            return
 
-    if not (public_names or local_names or global_names):
-        return
+    self.send_message(feedback, f"❓ Unknown category/command/module '{q}'. Try: {config.char}help")
 
-    if public_names:
-        line = "📣 Public: " + sep.join(sorted(set(public_names), key=str.lower))
-        for part in self.split_irc_message_parts([line], separator=""):
-            self.send_message(feedback, part)
-
-    # Afișăm Local dacă avem un #canal valid
-    if local_channel and str(local_channel).startswith("#") and local_names:
-        line = f"🏷️ Local ({local_channel}): " + sep.join(sorted(set(local_names), key=str.lower))
-        for part in self.split_irc_message_parts([line], separator=""):
-            self.send_message(feedback, part)
-    else:
-        # în PM/DCC, dacă există mai multe canale comune și userul are și comenzi locale,
-        # oferim un hint explicit
-        if channel.lower() == self.nickname.lower():
-            try:
-                user_chans = {row[0] for row in self.channel_details
-                              if (row[1] or "").lower() == nick.lower()}
-                bot_chans = set(self.channels or [])
-                commons = sorted(user_chans & bot_chans, key=str.lower)
-                if len(commons) > 1 and local_names:
-                    self.send_message(
-                        feedback,
-                        f"ℹ️ For channel-scoped commands, use: !help #channel  (common: {', '.join(commons)})"
-                    )
-            except Exception:
-                pass
-
-    if global_names:
-        line = "🌐 Global: " + sep.join(sorted(set(global_names), key=str.lower))
-        for part in self.split_irc_message_parts([line], separator=""):
-            self.send_message(feedback, part)
 
 
 def cmd_status(self, channel, feedback, nick, host, msg):

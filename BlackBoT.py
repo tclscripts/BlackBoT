@@ -2872,6 +2872,7 @@ class Bot(irc.IRCClient):
     def privmsg(self, user, channel, msg):
         nick = user.split("!")[0]
         host = user.split("!")[1]
+        ident = user.split("!", 1)[1].split("@", 1)[0]
         args = msg.split()
         command = ""
         feedback = channel
@@ -2879,7 +2880,8 @@ class Bot(irc.IRCClient):
         is_private = (channel.lower() == self.nickname.lower())
         is_nick_cmd = False
         is_other_chan = False
-        lhost = self.get_hostname(nick, f"{host}", 0)
+        hostmask = f"{ident}@{host}" if ident and host else host
+        lhost = self.get_hostname(nick, f"{hostmask}", 0)
 
         if not args:
             return
@@ -2902,6 +2904,24 @@ class Bot(irc.IRCClient):
 
         # if is public command
         else:
+            # Plugin hooks (PRIVMSG)
+            pm = getattr(self, "plugin_manager", None)
+            if pm:
+                try:
+                    pm.dispatch_hook(
+                        "PRIVMSG",
+                        channel=channel,
+                        feedback=feedback,
+                        nick=nick,
+                        ident=ident,
+                        host=host,
+                        message=msg,
+                        user=user,
+                        is_private=is_private,
+                        target_channel=target_channel,
+                    )
+                except Exception:
+                    logger.error("PRIVMSG hook dispatch error", exc_info=True)
             if args[0].startswith(s.char):
                 command = args[0][1:]
                 if len(args) > 1 and args[1].startswith("#"):
@@ -3733,7 +3753,6 @@ class Bot(irc.IRCClient):
                 'core.dcc_log_handler',
                 'core.nettools',
                 'core.threading_utils',
-                'modules.weather'
             ]
             for mod_name in modules_to_reload:
                 if mod_name in sys.modules:

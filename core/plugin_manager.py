@@ -7,7 +7,7 @@ Features:
 - ✅ Auto-discovery de plugin-uri din modules/custom/ + plugins/
 - ✅ Hot reload la runtime (fără restart)
 - ✅ Plugin isolation (fiecare plugin rulează independent)
-- ✅ Dependency management (metadata only)
+- ✅ Dependency management (metadata + auto-install)
 - ✅ Error handling per plugin
 - ✅ Plugin lifecycle hooks (on_load/on_unload/on_reload)
 - ✅ Hook dispatch pentru evenimente IRC (PRIVMSG/JOIN/PART/QUIT/NICK/KICK/etc.)
@@ -15,10 +15,13 @@ Features:
 - ✅ Help generic: .help <cmd> / .help <alias> (filtrează liniile pe flags din paranteză)
 
 Author: Claude
-Version: 1.0 (patched + aliases + hooks)
+Version: 1.0 (patched + aliases + hooks + deps auto-install)
 """
 
 import sys
+import ast
+import re
+import subprocess
 import importlib.util
 from pathlib import Path
 from typing import Dict, List, Optional, Callable, Any
@@ -116,7 +119,7 @@ class PluginBase:
     def has_access(self, channel: str, nick: str, host: str, required_flags: str) -> bool:
         """
         required_flags poate fi 'n' sau 'nmM' etc.
-        Semnificație: TRUE dacă user are ORICARE din flags (same logic ca has_any_flag).
+        TRUE dacă user are ORICARE din flags (logic OR).
         """
         user_id = self.resolve_user_id(nick, host)
         if not user_id:
@@ -126,7 +129,6 @@ class PluginBase:
         if not required_flags or required_flags == "-":
             return True
 
-        # OR: dacă are cel puțin una dintre litere
         for f in required_flags:
             try:
                 if self.bot.check_access(channel, user_id, f):
@@ -136,10 +138,7 @@ class PluginBase:
         return False
 
     def get_user_flags(self, channel: str, nick: str, host: str, universe: str = "NnmMAOV") -> str:
-        """
-        Returnează un string cu flags-urile pe care le are user-ul (dintr-un univers cunoscut),
-        calculat prin bot.check_access(). Nu depinde de coloana USERS.flags.
-        """
+        """Returnează flags pe care le are user-ul (calculat prin bot.check_access)."""
         user_id = self.resolve_user_id(nick, host)
         if not user_id:
             return ""
@@ -171,6 +170,24 @@ class PluginBase:
 # =============================================================================
 
 class PluginManager:
+    """
+    IMPORTANT:
+    - dependencies din PLUGIN_INFO sunt "pip names" (ex: yt-dlp, beautifulsoup4).
+    - import-name poate fi diferit (ex: yt_dlp, bs4).
+    """
+
+    # pip-name -> pip-name (când pluginul dă un alias scurt)
+    _PIP_NAME_MAP = {
+        "bs4": "beautifulsoup4",
+    }
+
+    # pip-name -> import-name (pentru find_spec)
+    _IMPORT_NAME_MAP = {
+        "yt-dlp": "yt_dlp",
+        "beautifulsoup4": "bs4",
+        "bs4": "bs4",
+    }
+
     def __init__(self, bot, plugin_dirs: List[str] = None):
         self.bot = bot
         self.plugin_dirs = plugin_dirs or ["modules/custom"]
@@ -205,6 +222,129 @@ class PluginManager:
         return discovered
 
     # -------------------------------------------------------------------------
+    # Dependencies: read + install before importing plugin module
+    # -------------------------------------------------------------------------
+
+    def _peek_plugin_info(self, plugin_path: Path) -> dict:
+        """
+        Parsează PLUGIN_INFO dict fără import (safe).
+        Returnează {} dacă nu există sau nu poate fi evaluat ca literal.
+        """
+        try:
+            source = plugin_path.read_text(encoding="utf-8", errors="ignore")
+            tree = ast.parse(source, filename=str(plugin_path))
+
+            for node in tree.body:
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id == "PLUGIN_INFO":
+                            return ast.literal_eval(node.value)  # safe literal dict/list/str/etc
+            return {}
+        except Exception as e:
+            logger.warning(f"Could not parse PLUGIN_INFO for {plugin_path.name}: {e}")
+            return {}
+
+    @staticmethod
+    def _strip_version(dep: str) -> str:
+        base = (dep or "").strip()
+        if not base:
+            return ""
+        return re.split(r"[<>=!~\s]", base, maxsplit=1)[0].strip()
+
+    def _dependency_installed(self, dep: str) -> bool:
+        """
+        Verifică dacă dependența e importabilă.
+        Fix pentru cazuri gen:
+          - pip: yt-dlp   -> import: yt_dlp
+          - pip: beautifulsoup4 -> import: bs4
+        """
+        base = self._strip_version(dep)
+        if not base:
+            return True
+
+        import_map = getattr(self, "_IMPORT_NAME_MAP", {}) or {}
+        import_name = import_map.get(base, base)
+
+        # 1) direct
+        try:
+            if importlib.util.find_spec(import_name) is not None:
+                return True
+        except Exception:
+            pass
+
+        # 2) heuristic: dash -> underscore (yt-dlp -> yt_dlp)
+        if "-" in base:
+            try_name = base.replace("-", "_")
+            try:
+                if importlib.util.find_spec(try_name) is not None:
+                    return True
+            except Exception:
+                pass
+
+        # 3) last resort: first segment (rare)
+        if "." in base:
+            try:
+                if importlib.util.find_spec(base.split(".", 1)[0]) is not None:
+                    return True
+            except Exception:
+                pass
+
+        return False
+
+    def _ensure_dependencies(self, deps: List[str], plugin_name: str) -> bool:
+        """
+        Instalează dependențe lipsă cu pip.
+        IMPORTANT: dacă check-ul e corect, nu vei mai vedea "Installing..." la fiecare restart.
+        """
+        deps = deps or []
+        missing: List[str] = []
+
+        for d in deps:
+            if not d:
+                continue
+            if self._dependency_installed(d):
+                continue
+
+            base = self._strip_version(d)
+            pip_name = self._PIP_NAME_MAP.get(base, d)
+            missing.append(pip_name)
+
+        if not missing:
+            return True
+
+        logger.info(f"Installing missing deps for '{plugin_name}': {missing}")
+
+        try:
+            cmd = [
+                sys.executable, "-m", "pip", "install",
+                "--disable-pip-version-check", "--no-input",
+                *missing
+            ]
+            p = subprocess.run(cmd, capture_output=True, text=True)
+
+            out = (p.stdout or "") + "\n" + (p.stderr or "")
+            if p.returncode != 0:
+                logger.error(f"pip install failed for '{plugin_name}': {out.strip()}")
+                return False
+
+            # Verificare după pip (ca să nu mințim în log)
+            still_missing = [d for d in deps if not self._dependency_installed(d)]
+            if still_missing:
+                logger.error(f"Deps still missing after pip for '{plugin_name}': {still_missing}")
+                return False
+
+            # log mai curat
+            if "already satisfied" in out.lower():
+                logger.info(f"ℹ️ Deps already satisfied for '{plugin_name}'")
+            else:
+                logger.info(f"✅ Deps installed for '{plugin_name}': {missing}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Dependency install error for '{plugin_name}': {e}", exc_info=True)
+            return False
+
+    # -------------------------------------------------------------------------
     # Aliases
     # -------------------------------------------------------------------------
 
@@ -227,7 +367,6 @@ class PluginManager:
     # -------------------------------------------------------------------------
 
     def send_command_help(self, bot, feedback, channel, nick, host, command: str):
-        # 🔁 resolve alias -> canonical command
         command = self.resolve_command_name(command)
 
         cmd = self.get_command(command)
@@ -235,7 +374,6 @@ class PluginManager:
             bot.send_message(feedback, "No help available.")
             return
 
-        # calc user_id o singură dată
         info = bot.sql.sqlite_handle(bot.botId, nick, host)
         user_id = info[0] if info else None
 
@@ -245,7 +383,6 @@ class PluginManager:
                 return True
             if user_id is None:
                 return False
-            # OR
             for f in flags:
                 try:
                     if bot.check_access(channel, user_id, f):
@@ -254,23 +391,16 @@ class PluginManager:
                     continue
             return False
 
-        # dacă comanda principală e restricționată, nu afișa help
         if cmd.flags and cmd.flags != "-":
             if not has_any_access(cmd.flags):
                 return
 
-        # trimite liniile din description (multi-line)
         lines = [l.rstrip() for l in cmd.description.splitlines() if l.strip()]
-
         for line in lines:
-            # Filtru pe liniile cu flags în paranteză (ex: "... (nmM)")
-            # Recomandare: pune flags fix la final, ex: ".quote del <id> -> delete (nmM)"
             if "(" in line and ")" in line and user_id is not None:
                 inside = line[line.find("(") + 1:line.find(")")].strip()
-                # acceptă doar string-uri de litere (nmM etc.)
                 if inside.isalpha() and not has_any_access(inside):
                     continue
-
             bot.send_message(feedback, line)
 
     # -------------------------------------------------------------------------
@@ -279,14 +409,22 @@ class PluginManager:
 
     def dispatch_hook(self, event: str, **kwargs):
         """
-        Apelează toate hook-urile înregistrate de plugin-uri pentru un event.
-        Semnături suportate:
-          - hook(bot, **kwargs)
-          - hook(**kwargs)
+        Dispatch hooks registered by plugins.
+        Safe for different hook signatures (filters kwargs).
         """
+        import inspect
+
         event = (event or "").upper().strip()
         if not event:
             return
+
+        payload = dict(kwargs)
+        payload.setdefault("bot", self.bot)
+
+        if "message" in payload and "msg" not in payload:
+            payload["msg"] = payload["message"]
+        if "msg" in payload and "message" not in payload:
+            payload["message"] = payload["msg"]
 
         for plugin_name, plug in list(self.plugins.items()):
             hooks = getattr(plug, "hooks", None)
@@ -299,10 +437,21 @@ class PluginManager:
 
             for fn in list(funcs):
                 try:
-                    try:
-                        fn(self.bot, **kwargs)
-                    except TypeError:
-                        fn(**kwargs)
+                    sig = inspect.signature(fn)
+                    accepted = sig.parameters
+                    call_kwargs = {k: v for k, v in payload.items() if k in accepted}
+
+                    # dacă lipsesc args obligatorii, nu apela hook-ul (nu spama log)
+                    for name, p in accepted.items():
+                        if p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                            continue
+                        if p.default is inspect._empty and name not in call_kwargs:
+                            raise StopIteration
+
+                    fn(**call_kwargs)
+
+                except StopIteration:
+                    continue
                 except Exception as e:
                     logger.error(f"Hook error: {plugin_name}.{event}: {e}", exc_info=True)
 
@@ -314,6 +463,13 @@ class PluginManager:
         plugin_name = plugin_path.stem
 
         try:
+            # --- deps BEFORE import ---
+            peek_info = self._peek_plugin_info(plugin_path)
+            deps = (peek_info or {}).get("dependencies", []) or []
+            if deps:
+                if not self._ensure_dependencies(deps, plugin_name):
+                    raise RuntimeError("Missing dependencies and auto-install failed.")
+
             if plugin_name in self.plugins:
                 logger.warning(f"Plugin '{plugin_name}' already loaded")
                 return False
@@ -326,7 +482,6 @@ class PluginManager:
 
             module = importlib.util.module_from_spec(spec)
 
-            # IMPORTANT: pune în sys.modules ca import intern/reload să funcționeze
             sys.modules[plugin_name] = module
             spec.loader.exec_module(module)
 
@@ -334,7 +489,6 @@ class PluginManager:
 
             plugin_instance: Optional[PluginBase] = None
 
-            # 1) Preferă class Plugin
             if hasattr(module, "Plugin"):
                 PluginClass = getattr(module, "Plugin")
                 plugin_instance = PluginClass(self.bot)
@@ -345,7 +499,6 @@ class PluginManager:
 
                 self._register_plugin_instance(plugin_name, plugin_instance)
 
-            # 2) register(bot)
             elif hasattr(module, "register"):
                 result = module.register(self.bot)
 
@@ -366,11 +519,9 @@ class PluginManager:
                     raise ValueError(
                         f"register(bot) must return dict or PluginBase; got {type(result).__name__}"
                     )
-
             else:
                 raise ValueError(f"Plugin {plugin_name} must have register() or Plugin class")
 
-            # Metadata (după ce ai înregistrat comenzile)
             metadata = self._extract_metadata(module, plugin_name, str(plugin_path))
             self.metadata[plugin_name] = metadata
 
@@ -404,14 +555,12 @@ class PluginManager:
             logger.info(f"Unloading plugin: {plugin_name}")
             plugin = self.plugins[plugin_name]
 
-            # on_unload
             if hasattr(plugin, "on_unload"):
                 try:
                     plugin.on_unload()
                 except Exception:
                     logger.error(f"Error in on_unload for '{plugin_name}'", exc_info=True)
 
-            # remove commands
             commands_to_remove = [
                 cmd_name for cmd_name, cmd in list(self.commands.items())
                 if getattr(cmd, "plugin_name", "") == plugin_name
@@ -419,7 +568,6 @@ class PluginManager:
             for cmd_name in commands_to_remove:
                 self.commands.pop(cmd_name, None)
 
-            # remove aliases that point to removed commands
             alias_to_remove = []
             for alias, canonical in self.command_aliases.items():
                 if canonical in commands_to_remove:
@@ -478,7 +626,6 @@ class PluginManager:
     # -------------------------------------------------------------------------
 
     def _register_command(self, plugin_name: str, cmd_name: str, cmd_func: Callable, **kwargs):
-        """Dict-style"""
         command = PluginCommand(
             name=cmd_name,
             function=cmd_func,
@@ -486,15 +633,12 @@ class PluginManager:
             **kwargs
         )
         self.commands[cmd_name] = command
-
         if plugin_name in self.metadata:
             self.metadata[plugin_name].commands.append(cmd_name)
 
     def _register_plugin_instance(self, plugin_name: str, plugin_instance: PluginBase):
-        """OOP-style"""
         if not hasattr(plugin_instance, "commands"):
             return
-
         for cmd_name, cmd in plugin_instance.commands.items():
             cmd.plugin_name = plugin_name
             self.commands[cmd_name] = cmd
@@ -573,21 +717,16 @@ def handle_plugin_command(bot, channel, feedback, nick, host, command, message):
 
         flags = plugin_cmd.flags or "-"
 
-        # Public -> direct
         if is_public_flag(flags):
             plugin_cmd.function(bot, channel, feedback, nick, host, message)
             return True
 
-        # userId
         info = bot.sql.sqlite_handle(bot.botId, nick, host)
         if not info:
             return True  # silent deny
 
         user_id = info[0]
 
-        # IMPORTANT:
-        # - Dacă flags e un string gen "nmM", noi păstrăm aceeași logică:
-        #   acces dacă are ORICARE dintre ele (exact ca help-ul).
         ok = False
         for f in (flags or ""):
             if bot.check_access(channel, user_id, f):
