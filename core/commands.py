@@ -902,6 +902,7 @@ def cmd_help(self, channel, feedback, nick, host, msg):
 
     ql = q.strip().lower()
 
+
     # -------------------------
     # 1) CATEGORII
     # -------------------------
