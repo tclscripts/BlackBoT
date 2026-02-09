@@ -646,10 +646,14 @@ def cmd_help(self, channel, feedback, nick, host, msg):
 
     local_channel = override_channel or guessed_channel or channel
 
-    # userId (logged-in if handle exists for this hostmask)
-    handle_info = self.sql.sqlite_handle(self.botId, nick, host)
-    userId = handle_info[0] if handle_info else None
-    is_logged = bool(userId)
+    host_mask = self.get_hostname(nick, host, 0)
+
+    # userId: try DB first, fallback to already logged-in session
+    handle_info = self.sql.sqlite_handle(self.botId, nick, host_mask)
+    userId = handle_info[0] if handle_info else self.get_logged_in_user_by_host(host_mask)
+
+    # logged state should be session-based
+    is_logged = bool(userId) and self.is_logged_in(userId, host_mask)
 
     cmds = self.commands or []
 
@@ -1000,7 +1004,7 @@ def cmd_help(self, channel, feedback, nick, host, msg):
         plugin_cmd = pm.get_command(canonical) if hasattr(pm, "get_command") else None
         if plugin_cmd:
             try:
-                pm.send_command_help(self, feedback, local_channel, nick, host, ql)
+                pm.send_command_help(self, feedback, local_channel, nick, host_mask, ql)
             except Exception:
                 descr = getattr(plugin_cmd, "description", "") or "No help available."
                 for line in [l.rstrip() for l in descr.splitlines() if l.strip()]:
