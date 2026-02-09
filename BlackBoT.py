@@ -151,6 +151,7 @@ channelStatusChars = "~@+%"
 current_instance = None
 
 
+
 def _load_version():
     try:
         with open("VERSION", "r", encoding="utf-8") as f:
@@ -252,6 +253,7 @@ class Bot(irc.IRCClient):
         self.message_queue = Queue(maxsize=1000)
         self.message_delay = s.message_delay
         self._start_worker("message_sender", target=self._message_worker, global_singleton=False)
+        self._start_worker("services_auth", target=self._services_auth_watchdog_loop, global_singleton=True)
         self.thread_check_for_changed_nick = None
         self._migrate_env_on_startup()
         if s.autoUpdateEnabled:
@@ -543,6 +545,88 @@ class Bot(irc.IRCClient):
 
         except Exception as e:
             logger.error(f"❌ Error during graceful shutdown: {e}", exc_info=True)
+
+    def _services_auth_watchdog_loop(self, stop_event, beat):
+        """
+        Periodic services auth watchdog:
+        - după split/reconnect, dacă services zic "session still active" sau nu răspund,
+          botul va reîncerca AUTH/IDENTIFY la interval.
+        """
+        import time
+
+        # intervalul “mare” între încercări (secunde)
+        interval = int(getattr(s, "auth_watchdog_interval", 60))
+        # tick intern, ca să putem opri rapid thread-ul
+        tick = 2
+
+        logger.info(f"🛡️ Services auth watchdog started (interval={interval}s)")
+
+        while not stop_event.is_set():
+            beat()
+
+            try:
+                # dacă nu suntem conectați complet, nu încercăm nimic
+                if not getattr(self, "connected", False):
+                    for _ in range(max(1, interval)):
+                        if stop_event.is_set():
+                            break
+                        time.sleep(1)
+                    continue
+
+                any_auth_configured = (
+                        (getattr(s, "quakenet_auth_enabled", False) and getattr(s, "quakenet_username", "") and getattr(
+                            s, "quakenet_password", "")) or
+                        (getattr(s, "undernet_auth_enabled", False) and getattr(s, "undernet_username", "") and getattr(
+                            s, "undernet_password", "")) or
+                        (getattr(s, "nickserv_login_enabled", False) and getattr(s, "nickserv_password", ""))
+                )
+
+                if not any_auth_configured:
+                    # nimic de făcut
+                    for _ in range(interval):
+                        if stop_event.is_set():
+                            break
+                        time.sleep(1)
+                    continue
+
+                # dacă deja e autentificat -> doar dormim
+                if getattr(self, "authenticated", False):
+                    for _ in range(interval):
+                        if stop_event.is_set():
+                            break
+                        time.sleep(1)
+                    continue
+
+                # dacă așteptăm deja reply la auth -> nu spamăm
+                if getattr(self, "nickserv_waiting", False):
+                    for _ in range(min(10, interval)):
+                        if stop_event.is_set():
+                            break
+                        time.sleep(1)
+                    continue
+
+                # rate-limit: max 1 încercare la `interval` secunde
+                if hasattr(self, "_cooldown_ok"):
+                    if not self._cooldown_ok("services_auth_attempt", float(interval)):
+                        for _ in range(tick):
+                            if stop_event.is_set():
+                                break
+                            time.sleep(1)
+                        continue
+
+                logger.warning("🔄 Auth watchdog: re-trying services authentication...")
+                self.perform_authentication()
+
+            except Exception as e:
+                logger.error(f"Auth watchdog error: {e}", exc_info=True)
+
+            # sleep “mic” ca să fie responsive
+            for _ in range(tick):
+                if stop_event.is_set():
+                    break
+                time.sleep(1)
+
+        logger.info("🛡️ Services auth watchdog stopped")
 
     def _start_worker(self, name: str, target, daemon: bool = True, global_singleton: bool = True):
         import inspect
