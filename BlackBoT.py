@@ -2095,7 +2095,7 @@ class Bot(irc.IRCClient):
                 "public": True
             }
         lhost = self.get_hostname(nick, host, 0)
-        info = self.sql.sqlite_handle(self.botId, nick, host)
+        info = self.sql.sqlite_handle(self.botId, nick, lhost)
 
         if info:
             userId = info[0]
